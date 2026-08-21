@@ -1,0 +1,355 @@
+/* ===== 全局样式 ===== */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #0a0e1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+/* ===== 头部 ===== */
+.main-header {
+    text-align: center;
+    padding: 20px;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border-bottom: 2px solid #4A90E2;
+}
+
+.main-header h1 {
+    font-size: 2rem;
+    color: #4A90E2;
+    text-shadow: 0 0 20px rgba(74, 144, 226, 0.3);
+}
+
+.main-header .subtitle {
+    color: #888;
+    margin-top: 5px;
+    font-size: 0.9rem;
+}
+
+/* ===== 布局 ===== */
+.app-container {
+    display: flex;
+    gap: 20px;
+    padding: 20px;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+.sidebar {
+    width: 300px;
+    flex-shrink: 0;
+}
+
+.main-content {
+    flex: 1;
+    min-width: 0;
+}
+
+/* ===== 面板 ===== */
+.panel {
+    background: #1E2130;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+    border-left: 4px solid #4A90E2;
+}
+
+.panel h3 {
+    color: #4A90E2;
+    margin-bottom: 12px;
+    font-size: 1rem;
+}
+
+/* ===== 按钮 ===== */
+.btn {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.3s;
+}
+
+.btn-block {
+    width: 100%;
+}
+
+.btn-primary {
+    background: #4A90E2;
+    color: white;
+}
+
+.btn-primary:hover {
+    background: #357ABD;
+    box-shadow: 0 0 15px rgba(74, 144, 226, 0.4);
+}
+
+.btn-success {
+    background: #27ae60;
+    color: white;
+}
+
+.btn-secondary {
+    background: #555;
+    color: white;
+}
+
+.btn-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.btn-row .btn {
+    flex: 1;
+}
+
+/* ===== 滑块 ===== */
+.slider-group {
+    margin: 10px 0;
+}
+
+.slider-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.slider-group input[type="range"] {
+    width: 100%;
+    accent-color: #4A90E2;
+}
+
+/* ===== 统计网格 ===== */
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.stat-item {
+    background: #16213e;
+    padding: 8px;
+    border-radius: 6px;
+    text-align: center;
+}
+
+.stat-label {
+    display: block;
+    font-size: 0.7rem;
+    color: #888;
+}
+
+.stat-value {
+    display: block;
+    font-size: 1.1rem;
+    color: #4A90E2;
+    font-weight: bold;
+}
+
+/* ===== 光谱图例 ===== */
+.spectral-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 0.85rem;
+}
+
+.spectral-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+
+/* ===== 章节 ===== */
+.section {
+    margin-bottom: 24px;
+}
+
+.section-title {
+    color: #FF6B6B;
+    font-size: 1.3rem;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #4A90E2;
+}
+
+.two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+/* ===== 3D画布 ===== */
+.canvas-container {
+    width: 100%;
+    height: 600px;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    position: relative;
+}
+
+.canvas-container canvas {
+    display: block;
+}
+
+.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #666;
+    font-size: 1.1rem;
+}
+
+/* ===== 2D图表 ===== */
+#chart-2d {
+    width: 100%;
+    background: #111;
+    border-radius: 8px;
+}
+
+/* ===== 表格 ===== */
+.table-container {
+    max-height: 400px;
+    overflow-y: auto;
+    border-radius: 8px;
+    background: #16213e;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #2d4059;
+}
+
+th {
+    background: #0f3460;
+    color: #4A90E2;
+    position: sticky;
+    top: 0;
+}
+
+tr:hover {
+    background: rgba(74, 144, 226, 0.1);
+}
+
+/* ===== 提示框 ===== */
+.tooltip {
+    position: fixed;
+    background: rgba(20, 25, 40, 0.95);
+    border: 1px solid #4A90E2;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 1000;
+    max-width: 280px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.tooltip .star-name {
+    color: #4A90E2;
+    font-weight: bold;
+    font-size: 1rem;
+    margin-bottom: 6px;
+}
+
+.tooltip .star-detail {
+    color: #ccc;
+    line-height: 1.5;
+}
+
+/* ===== FOV 缩放指示器 ===== */  ← 插入在这里
+.fov-indicator {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #4A90E2;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 10;
+}
+
+/* ===== 加载遮罩 ===== */
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.spinner {
+    width: 50px;
+    height: 50px;
+    border: 4px solid #333;
+    border-top-color: #4A90E2;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 16px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ===== 其他 ===== */
+.status-text {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.filter-info {
+    margin-top: 10px;
+    font-size: 0.8rem;
+    color: #aaa;
+}
+
+.help-list {
+    list-style: none;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.help-list li {
+    padding: 4px 0;
+}
+
+/* ===== 响应式 ===== */
+@media (max-width: 1024px) {
+    .app-container {
+        flex-direction: column;
+    }
+    .sidebar {
+        width: 100%;
+    }
+    .two-col {
+        grid-template-columns: 1fr;
+    }
+}
