@@ -72,11 +72,3 @@ git push
 
 ---
 
-## ⚠️ Notice
-
-| Problem | Solution |
-|------|----------|
-| The presence of spaces in the path caused the git command to fail. | Always enclose paths in double quotes |
-| Password required when sending push notifications | Use SSH instead or configure [Personal Access Token](https://github.com/settings/tokens)|
-| I accidentally uploaded `astro_env/` | After deleting, push again: `git rm -r --cached backend/astro_env && git commit -m "chore: Remove virtual environment" && git push`|
-| Want to keep both Streamlit and other versions? | Simply place `celestial_web_app.py` in the root directory or a subdirectory of `streamlit/` and commit them together. |
