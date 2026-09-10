@@ -1,6 +1,6 @@
 /**
- * Three.js 3D天球渲染模块
- * 相机固定在天球中心，滚轮控制FOV实现缩放
+ * scene3d.js - Three.js 3D 天球渲染
+ * 相机固定天球中心；滚轮 FOV 缩放；拖拽旋转；时间系统驱动周日旋转
  */
 class CelestialScene3D {
     constructor(containerId) {
@@ -11,168 +11,106 @@ class CelestialScene3D {
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.starData = [];
+        this.starLayers = [];
         this.labels = [];
         this.animationId = null;
         this.circleTexture = this._createCircleTexture();
 
-        // ===== 视角控制参数 =====
-        this.fovDefault = 60;       // 默认FOV
-        this.fovMin = 10;           // 最小FOV（最大放大，望远镜效果）
-        this.fovMax = 110;          // 最大FOV（最大缩小，广角效果）
-        this.fovStep = 3;           // 每次滚轮变化量
-
-        // 球坐标控制相机朝向（theta=水平旋转, phi=垂直旋转）
-        this.theta = Math.PI / 2;   // 初始朝向
-        this.phi = Math.PI / 2;     // π/2 = 水平方向
-        this.rotateSpeed = 0.003;   // 拖拽旋转灵敏度
-
-        // 鼠标状态
+        this.fovDefault = 60;
+        this.fovMin = 10;
+        this.fovMax = 110;
+        this.fovStep = 3;
+        this.theta = Math.PI / 2;
+        this.phi = Math.PI / 2;
+        this.rotateSpeed = 0.003;
         this.isDragging = false;
         this.lastMouseX = 0;
         this.lastMouseY = 0;
+        this._focusAnim = null;
 
         this.SPECTRAL_COLORS = {
-            'O': 0x9bb0ff,
-            'B': 0xaabfff,
-            'A': 0xcad7ff,
-            'F': 0xf8f7ff,
-            'G': 0xfff4ea,
-            'K': 0xffd2a1,
-            'M': 0xffcc6f,
-            'Other': 0xaaaaaa
+            'O': 0x9bb0ff, 'B': 0xaabfff, 'A': 0xcad7ff, 'F': 0xf8f7ff,
+            'G': 0xfff4ea, 'K': 0xffd2a1, 'M': 0xffcc6f, 'Other': 0xaaaaaa
         };
     }
 
-    // ✅ _createCircleTexture 放在这里（constructor 之后、init 之前）
-    /**
-     * 用 Canvas 动态生成圆形纹理
-     */
     _createCircleTexture() {
         const size = 64;
         const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
+        canvas.width = size; canvas.height = size;
         const ctx = canvas.getContext('2d');
-
-        const gradient = ctx.createRadialGradient(
-            size / 2, size / 2, 0,
-            size / 2, size / 2, size / 2
-        );
-        gradient.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
-        gradient.addColorStop(0.4, 'rgba(255, 255, 255, 0.8)');
-        gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.3)');
-        gradient.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
-
-        ctx.fillStyle = gradient;
+        const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+        g.addColorStop(0, 'rgba(255,255,255,1.0)');
+        g.addColorStop(0.4, 'rgba(255,255,255,0.8)');
+        g.addColorStop(0.7, 'rgba(255,255,255,0.3)');
+        g.addColorStop(1, 'rgba(255,255,255,0.0)');
+        ctx.fillStyle = g;
         ctx.fillRect(0, 0, size, size);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
-        return texture;
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
     }
 
     init() {
-        const width = this.container.clientWidth;
-        const height = this.container.clientHeight;
-
-        // 场景
+        const width  = this.container.clientWidth  || window.innerWidth;
+        const height = this.container.clientHeight || window.innerHeight;
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x000000);
-
-        // ===== 相机：固定在天球中心 =====
-        this.camera = new THREE.PerspectiveCamera(
-            this.fovDefault,      // FOV
-            width / height,       // 宽高比
-            0.01,                 // 近裁剪面（非常小，因为相机在原点）
-            100                   // 远裁剪面
-        );
-        this.camera.position.set(0, 0, 0);  // 始终在天球中心！
-
-        // 渲染器
+        this.camera = new THREE.PerspectiveCamera(this.fovDefault, width / height, 0.01, 100);
+        this.camera.position.set(0, 0, 0);
         this.renderer = new THREE.WebGLRenderer({ antialias: true });
         this.renderer.setSize(width, height);
         this.renderer.setPixelRatio(window.devicePixelRatio);
         this.container.appendChild(this.renderer.domElement);
 
-        // ===== 不使用 OrbitControls，自己实现交互 =====
+        this.skyGroup = new THREE.Group();
+        this.scene.add(this.skyGroup);
+
         this._setupMouseControls();
-
-        // 添加天球网格
         this.addGrid();
-
-        // 初始相机朝向
         this._updateCameraDirection();
-
-        // 窗口大小变化
         window.addEventListener('resize', () => this.onResize());
-
-        // 开始渲染循环
         this.animate();
     }
 
-    // ===== 鼠标交互 =====
     _setupMouseControls() {
         const canvas = this.renderer.domElement;
-
-        // 鼠标按下 → 开始拖拽旋转
         canvas.addEventListener('mousedown', (e) => {
             this.isDragging = true;
             this.lastMouseX = e.clientX;
             this.lastMouseY = e.clientY;
+            this._focusAnim = null;
             canvas.style.cursor = 'grabbing';
         });
-
-        // 鼠标移动 → 旋转视角
         canvas.addEventListener('mousemove', (e) => {
-            // 更新射线检测（悬停提示）
             this._updateRaycast(e);
-
             if (!this.isDragging) return;
-
             const dx = e.clientX - this.lastMouseX;
             const dy = e.clientY - this.lastMouseY;
-
-            // 水平拖拽 → 改变 theta（左右看）
-            this.theta -= dx * this.rotateSpeed;
-
-            // 垂直拖拽 → 改变 phi（上下看）
-            this.phi -= dy * this.rotateSpeed;
-            // 限制 phi 范围，防止翻转
+            this.theta += dx * this.rotateSpeed;
+            this.phi   -= dy * this.rotateSpeed;
             this.phi = Math.max(0.01, Math.min(Math.PI - 0.01, this.phi));
-
             this.lastMouseX = e.clientX;
             this.lastMouseY = e.clientY;
-
             this._updateCameraDirection();
         });
-
-        // 鼠标松开 → 停止拖拽
         window.addEventListener('mouseup', () => {
             this.isDragging = false;
             canvas.style.cursor = 'grab';
         });
-
-        // ===== 滚轮 → FOV缩放（核心修改！）=====
         canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
-
-            const direction = e.deltaY > 0 ? 1 : -1;
-            this.camera.fov += direction * this.fovStep;
-            this.camera.fov = Math.max(this.fovMin, Math.min(this.fovMax, this.camera.fov));
+            const dir = e.deltaY > 0 ? 1 : -1;
+            this.camera.fov = Math.max(this.fovMin,
+                Math.min(this.fovMax, this.camera.fov + dir * this.fovStep));
             this.camera.updateProjectionMatrix();
-
-            // ✅ 新增：星星大小跟随FOV变化
             this._updateStarSizes();
-
-            // 更新FOV指示器
-            const indicator = document.getElementById('fov-indicator');
-            if (indicator) {
-                indicator.textContent = `FOV: ${this.camera.fov.toFixed(0)}°`;
-                indicator.style.display = 'block';
+            const ind = document.getElementById('fov-indicator');
+            if (ind) {
+                ind.textContent = `FOV: ${this.camera.fov.toFixed(0)}°`;
+                ind.style.display = 'block';
             }
         }, { passive: false });
-
-        // 双击 → 重置视角
         canvas.addEventListener('dblclick', () => {
             this.camera.fov = this.fovDefault;
             this.camera.updateProjectionMatrix();
@@ -180,61 +118,42 @@ class CelestialScene3D {
             this.phi = Math.PI / 2;
             this._updateCameraDirection();
         });
-
-        // 初始光标样式
         canvas.style.cursor = 'grab';
     }
 
-    // 根据球坐标更新相机朝向
     _updateCameraDirection() {
         const lookTarget = new THREE.Vector3(
-            Math.sin(this.phi) * Math.cos(this.theta),
+            Math.sin(this.phi) * Math.cos(-this.theta),
             Math.cos(this.phi),
-            Math.sin(this.phi) * Math.sin(this.theta)
+            Math.sin(this.phi) * Math.sin(-this.theta)
         );
         this.camera.lookAt(lookTarget);
     }
 
     _updateStarSizes() {
-        const scaleFactor = this.fovDefault / this.camera.fov;
-
+        const f = this.fovDefault / this.camera.fov;
         for (const layer of this.starLayers) {
-            if (layer.userData.baseSize) {
-                layer.material.size = layer.userData.baseSize * scaleFactor;
-            }
+            if (layer.userData.baseSize) layer.material.size = layer.userData.baseSize * f;
         }
     }
+
     _updateRaycast(event) {
         const rect = this.container.getBoundingClientRect();
-        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
+        this.mouse.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+        this.mouse.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
         this.raycaster.setFromCamera(this.mouse, this.camera);
         this.raycaster.params.Points.threshold = 0.02;
-
         const tooltip = document.getElementById('tooltip');
-
-        // 遍历所有星星层进行检测
         let closestStar = null;
         let closestDist = Infinity;
-
-        if (this.starLayers && this.starLayers.length > 0) {
-            for (const layer of this.starLayers) {
-                // 跳过光辉层（没有对应 starData）
-                if (!layer.geometry.attributes.position || 
-                    layer.material.opacity < 0.5) continue;
-
-                const intersects = this.raycaster.intersectObject(layer);
-                if (intersects.length > 0 && intersects[0].distance < closestDist) {
-                    closestDist = intersects[0].distance;
-                    const idx = intersects[0].index;
-                    // 注意：这里的 index 是层内索引，需要在 starData 中找到对应星星
-                    // 简化方案：直接用全局 starData 做距离匹配
-                    closestStar = this._findNearestStar(intersects[0].point);
-                }
+        for (const layer of this.starLayers) {
+            if (!layer.geometry.attributes.position || layer.material.opacity < 0.5) continue;
+            const hits = this.raycaster.intersectObject(layer);
+            if (hits.length > 0 && hits[0].distance < closestDist) {
+                closestDist = hits[0].distance;
+                closestStar = this._findNearestStar(layer.worldToLocal(hits[0].point.clone()));
             }
         }
-
         if (closestStar) {
             tooltip.innerHTML = `
                 <div class="star-name">${closestStar.name}</div>
@@ -244,206 +163,132 @@ class CelestialScene3D {
                     赤纬: ${closestStar.dec.toFixed(2)}°<br>
                     视星等: ${closestStar.mag}<br>
                     光谱: ${closestStar.spect}<br>
-                    距离: ${closestStar.dist_ly} ly<br>
-                    <span style="color:#666;font-size:0.7rem">FOV: ${this.camera.fov.toFixed(0)}°</span>
-                </div>
-            `;
+                    距离: ${closestStar.dist_ly} ly
+                </div>`;
             tooltip.style.display = 'block';
             tooltip.style.left = (event.clientX + 15) + 'px';
-            tooltip.style.top = (event.clientY + 15) + 'px';
+            tooltip.style.top  = (event.clientY + 15) + 'px';
         } else {
             tooltip.style.display = 'none';
         }
     }
 
-    // 新增辅助方法：根据3D坐标查找最近的星星
     _findNearestStar(point) {
         let best = null;
         let bestDist = Infinity;
         for (const star of this.starData) {
             const dx = star.x - point.x;
-            const dy = star.z - point.y;  // 注意Y/Z映射
-            const dz = star.y - point.z;
-            const dist = dx*dx + dy*dy + dz*dz;
-            if (dist < bestDist) {
-                bestDist = dist;
-                best = star;
-            }
+            const dy = star.z - point.y;
+            const dz = -star.y - point.z;
+            const dist = dx * dx + dy * dy + dz * dz;
+            if (dist < bestDist) { bestDist = dist; best = star; }
         }
-        return bestDist < 0.001 ? best : null;  // 阈值防止误触
+        return bestDist < 0.001 ? best : null;
     }
 
-    // ===== 天球网格 =====
     addGrid() {
-        // 天球赤道（青色）
-        const eqPoints = [];
+        const eqPts = [];
         for (let i = 0; i <= 128; i++) {
-            const angle = (i / 128) * Math.PI * 2;
-            eqPoints.push(new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle)));
+            const a = (i / 128) * Math.PI * 2;
+            eqPts.push(new THREE.Vector3(Math.cos(a), 0, Math.sin(a)));
         }
-        const eqGeom = new THREE.BufferGeometry().setFromPoints(eqPoints);
-        const eqMat = new THREE.LineBasicMaterial({
-            color: 0x00ffff, transparent: true, opacity: 0.4
-        });
-        this.scene.add(new THREE.Line(eqGeom, eqMat));
-
-        // 赤纬圈（灰色虚线，每30°）
+        this.skyGroup.add(new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(eqPts),
+            new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.4 })));
         for (let dec = -60; dec <= 60; dec += 30) {
             if (dec === 0) continue;
-            const decRad = (dec * Math.PI) / 180;
-            const radius = Math.cos(decRad);
-            const height = Math.sin(decRad);
-            const points = [];
+            const r = Math.cos(dec * Math.PI / 180), h = Math.sin(dec * Math.PI / 180);
+            const pts = [];
             for (let i = 0; i <= 64; i++) {
-                const angle = (i / 64) * Math.PI * 2;
-                points.push(new THREE.Vector3(
-                    radius * Math.cos(angle), height, radius * Math.sin(angle)
-                ));
+                const a = (i / 64) * Math.PI * 2;
+                pts.push(new THREE.Vector3(r * Math.cos(a), h, r * Math.sin(a)));
             }
-            const geom = new THREE.BufferGeometry().setFromPoints(points);
-            const mat = new THREE.LineBasicMaterial({
-                color: 0x444444, transparent: true, opacity: 0.3
-            });
-            this.scene.add(new THREE.Line(geom, mat));
+            this.skyGroup.add(new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints(pts),
+                new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.3 })));
         }
-
-        // 赤经线（绿色，每3小时）
         for (let ra = 0; ra < 24; ra += 3) {
-            const raRad = (ra * 15 * Math.PI) / 180;
-            const points = [];
+            const raRad = -(ra * 15 * Math.PI) / 180;
+            const pts = [];
             for (let i = 0; i <= 50; i++) {
-                const decRad = -Math.PI / 2 + (Math.PI * i) / 50;
-                points.push(new THREE.Vector3(
-                    Math.cos(decRad) * Math.cos(raRad),
-                    Math.sin(decRad),
-                    Math.cos(decRad) * Math.sin(raRad)
-                ));
+                const d = -Math.PI / 2 + (Math.PI * i) / 50;
+                pts.push(new THREE.Vector3(
+                    Math.cos(d) * Math.cos(raRad), Math.sin(d), Math.cos(d) * Math.sin(raRad)));
             }
-            const geom = new THREE.BufferGeometry().setFromPoints(points);
-            const mat = new THREE.LineBasicMaterial({
-                color: 0x00ff00, transparent: true, opacity: 0.2
-            });
-            this.scene.add(new THREE.Line(geom, mat));
+            this.skyGroup.add(new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints(pts),
+                new THREE.LineBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.2 })));
         }
     }
 
-    // ===== 更新星星 =====
     updateStars(stars, brightStars) {
-        // 清除旧对象
-        if (this.starLayers) {
-            this.starLayers.forEach(layer => this.scene.remove(layer));
-        }
-        this.labels.forEach(l => this.scene.remove(l));
+        this.starLayers.forEach(l => this.skyGroup.remove(l));
+        this.labels.forEach(l => this.skyGroup.remove(l));
         this.labels = [];
-        this.starData = stars;
         this.starLayers = [];
+        this.starData = stars;
+        if (!stars.length) return;
 
-        if (stars.length === 0) return;
-
-        // ===== 按星等分层定义 =====
-        // 每层: { maxMag: 该层包含的最暗星等, size: 像素大小, opacity: 透明度 }
         const layers = [
-            { maxMag: 1.0,  size: 7,  opacity: 1.0  },   // 极亮星 (≤1等)
-            { maxMag: 2.5,  size: 5,  opacity: 0.95 },   // 亮星   (1~2.5等)
-            { maxMag: 4.0,  size: 3,  opacity: 0.85 },   // 中等星 (2.5~4等)
-            { maxMag: 6.0,  size: 2,  opacity: 0.7  },   // 暗星   (4~6等)
+            { maxMag: 1.0, size: 7, opacity: 1.0 },
+            { maxMag: 2.5, size: 5, opacity: 0.95 },
+            { maxMag: 4.0, size: 3, opacity: 0.85 },
+            { maxMag: 6.0, size: 2, opacity: 0.7 }
         ];
-
-        // 为每一层创建独立的 Points 对象
-        let prevMaxMag = -Infinity;
+        let prev = -Infinity;
         for (const layer of layers) {
-            // 筛选属于当前层的星星
-            const layerStars = stars.filter(
-                s => s.mag > prevMaxMag && s.mag <= layer.maxMag
-            );
-            prevMaxMag = layer.maxMag;
-
-            if (layerStars.length === 0) continue;
-
-            const positions = new Float32Array(layerStars.length * 3);
-            const colors = new Float32Array(layerStars.length * 3);
-
-            layerStars.forEach((star, i) => {
-                positions[i * 3]     = star.x;
-                positions[i * 3 + 1] = star.z;   // Three.js Y轴朝上
-                positions[i * 3 + 2] = star.y;
-
-                const color = new THREE.Color(
-                    this.SPECTRAL_COLORS[star.spect_class] || 0xaaaaaa
-                );
-                colors[i * 3]     = color.r;
-                colors[i * 3 + 1] = color.g;
-                colors[i * 3 + 2] = color.b;
+            const ls = stars.filter(s => s.mag > prev && s.mag <= layer.maxMag);
+            prev = layer.maxMag;
+            if (!ls.length) continue;
+            const pos = new Float32Array(ls.length * 3);
+            const col = new Float32Array(ls.length * 3);
+            ls.forEach((s, i) => {
+                pos[i*3] = s.x; pos[i*3+1] = s.z; pos[i*3+2] = -s.y;
+                const c = new THREE.Color(this.SPECTRAL_COLORS[s.spect_class] || 0xaaaaaa);
+                col[i*3] = c.r; col[i*3+1] = c.g; col[i*3+2] = c.b;
             });
-
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-            const material = new THREE.PointsMaterial({
-                size: layer.size,
-                map: this.circleTexture,        // ← 新增：圆形纹理
-                alphaTest: 0.01,                // ← 新增：丢弃完全透明像素，避免方形边框
-                vertexColors: true,
-                transparent: true,
-                opacity: layer.opacity,
-                sizeAttenuation: false,
-                depthWrite: false
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            const mat = new THREE.PointsMaterial({
+                size: layer.size, map: this.circleTexture, alphaTest: 0.01,
+                vertexColors: true, transparent: true, opacity: layer.opacity,
+                sizeAttenuation: false, depthWrite: false
             });
-
-            const points = new THREE.Points(geometry, material);
-            points.userData.baseSize = layer.size;
-            this.scene.add(points);
-            this.starLayers.push(points);
+            const pts = new THREE.Points(geo, mat);
+            pts.userData.baseSize = layer.size;
+            this.skyGroup.add(pts);
+            this.starLayers.push(pts);
         }
-
-        // ===== 亮星光辉层（可选增强） =====
-        const glowStars = stars.filter(s => s.mag <= 2.5);
-        if (glowStars.length > 0) {
-            const gPos = new Float32Array(glowStars.length * 3);
-            const gCol = new Float32Array(glowStars.length * 3);
-
-            glowStars.forEach((star, i) => {
-                gPos[i * 3]     = star.x;
-                gPos[i * 3 + 1] = star.z;
-                gPos[i * 3 + 2] = star.y;
-
-                const c = new THREE.Color(
-                    this.SPECTRAL_COLORS[star.spect_class] || 0xaaaaaa
-                );
-                gCol[i * 3]     = c.r;
-                gCol[i * 3 + 1] = c.g;
-                gCol[i * 3 + 2] = c.b;
+        // 亮星光辉层
+        const gs = stars.filter(s => s.mag <= 2.5);
+        if (gs.length) {
+            const gp = new Float32Array(gs.length * 3);
+            const gc = new Float32Array(gs.length * 3);
+            gs.forEach((s, i) => {
+                gp[i*3] = s.x; gp[i*3+1] = s.z; gp[i*3+2] = -s.y;
+                const c = new THREE.Color(this.SPECTRAL_COLORS[s.spect_class] || 0xaaaaaa);
+                gc[i*3] = c.r; gc[i*3+1] = c.g; gc[i*3+2] = c.b;
             });
-
-            const gGeom = new THREE.BufferGeometry();
-            gGeom.setAttribute('position', new THREE.BufferAttribute(gPos, 3));
-            gGeom.setAttribute('color', new THREE.BufferAttribute(gCol, 3));
-
-            const glowMat = new THREE.PointsMaterial({
-                size: 12,
-                map: this.circleTexture,        // ← 新增
-                alphaTest: 0.01,                // ← 新增
-                vertexColors: true,
-                transparent: true,
-                opacity: 0.15,
-                sizeAttenuation: false,
-                depthWrite: false
+            const gg = new THREE.BufferGeometry();
+            gg.setAttribute('position', new THREE.BufferAttribute(gp, 3));
+            gg.setAttribute('color', new THREE.BufferAttribute(gc, 3));
+            const gm = new THREE.PointsMaterial({
+                size: 12, map: this.circleTexture, alphaTest: 0.01, vertexColors: true,
+                transparent: true, opacity: 0.15, sizeAttenuation: false, depthWrite: false
             });
-
-            const glowPoints = new THREE.Points(gGeom, glowMat);
-            glowPoints.userData.baseSize = 12;
-            this.scene.add(glowPoints);
-            this.starLayers.push(glowPoints);
+            const gpts = new THREE.Points(gg, gm);
+            gpts.userData.baseSize = 12;
+            this.skyGroup.add(gpts);
+            this.starLayers.push(gpts);
         }
-
-        // ===== 亮星文字标注 =====
-        if (brightStars && brightStars.length > 0) {
-            brightStars.forEach(star => {
-                const sprite = this.createTextSprite(star.name);
-                sprite.position.set(star.x * 1.05, star.z * 1.05, star.y * 1.05);
-                this.scene.add(sprite);
-                this.labels.push(sprite);
+        // 亮星标注
+        if (brightStars) {
+            brightStars.forEach(s => {
+                const sp = this.createTextSprite(s.name);
+                sp.position.set(s.x * 1.05, s.z * 1.05, -s.y * 1.05);
+                this.skyGroup.add(sp);
+                this.labels.push(sp);
             });
         }
     }
@@ -451,37 +296,79 @@ class CelestialScene3D {
     createTextSprite(text) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = 256;
-        canvas.height = 64;
-
+        canvas.width = 256; canvas.height = 64;
         ctx.font = 'Bold 20px Arial';
         ctx.fillStyle = 'white';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(text, 128, 32);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        const material = new THREE.SpriteMaterial({
-            map: texture, transparent: true, depthWrite: false
-        });
-
-        const sprite = new THREE.Sprite(material);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: new THREE.CanvasTexture(canvas), transparent: true, depthWrite: false
+        }));
         sprite.scale.set(0.12, 0.03, 1);
         return sprite;
     }
 
-    // ===== 渲染循环 =====
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
+        if (this.skyGroup && window.timeManager) {
+            this.skyGroup.rotation.y = -window.timeManager.getLocalSiderealTime();
+        }
+        if (this._focusAnim) {
+            const a = this._focusAnim;
+            const k = Math.min(1, (performance.now() - a.t0) / a.duration);
+            const e = k < 0.5 ? 2*k*k : 1 - Math.pow(-2*k + 2, 2) / 2;
+            this.theta = a.fromTheta + a.dTheta * e;
+            this.phi   = a.fromPhi + (a.toPhi - a.fromPhi) * e;
+            this._updateCameraDirection();
+            if (k >= 1) this._focusAnim = null;
+        }
         this.renderer.render(this.scene, this.camera);
     }
 
     onResize() {
-        const width = this.container.clientWidth;
-        const height = this.container.clientHeight;
-        this.camera.aspect = width / height;
+        const w = this.container.clientWidth  || window.innerWidth;
+        const h = this.container.clientHeight || window.innerHeight;
+        this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
-        this.renderer.setSize(width, height);
+        this.renderer.setSize(w, h);
+    }
+
+    focusOnStar(star, duration = 1200) {
+        if (!star) return;
+        const rho = this.skyGroup ? this.skyGroup.rotation.y : 0;
+        const p = new THREE.Vector3(star.x, star.z, -star.y)
+            .applyAxisAngle(new THREE.Vector3(0, 1, 0), rho);
+        const targetTheta = Math.atan2(-p.z, p.x);
+        const targetPhi   = Math.acos(THREE.MathUtils.clamp(p.y, -1, 1));
+        let dTheta = targetTheta - this.theta;
+        while (dTheta >  Math.PI) dTheta -= Math.PI * 2;
+        while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+        this._focusAnim = {
+            t0: performance.now(), duration,
+            fromTheta: this.theta, dTheta,
+            fromPhi: this.phi, toPhi: targetPhi
+        };
+        this._flashHighlight(star);
+    }
+
+    _flashHighlight(star) {
+        const mat = new THREE.SpriteMaterial({
+            map: this.circleTexture, color: 0xffdd44,
+            transparent: true, opacity: 0.95, depthWrite: false
+        });
+        const sp = new THREE.Sprite(mat);
+        sp.position.set(star.x, star.z, -star.y);
+        sp.scale.set(0.1, 0.1, 1);
+        this.skyGroup.add(sp);
+        const t0 = performance.now();
+        const fade = () => {
+            const k = (performance.now() - t0) / 2500;
+            if (k >= 1) { this.skyGroup.remove(sp); mat.dispose(); return; }
+            mat.opacity = 0.95 * (1 - k);
+            requestAnimationFrame(fade);
+        };
+        fade();
     }
 
     destroy() {

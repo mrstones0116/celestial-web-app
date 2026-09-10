@@ -3,160 +3,138 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌌 3D天球可视化系统 - HYG星表</title>
+    <title>3D 天球可视化系统 - AI Stargazing</title>
+    <!-- 任何 JS 报错都会显示为顶部红色横幅，不再白屏猜谜 -->
+    <script>
+    window.addEventListener('error', function (e) {
+        var b = document.getElementById('js-error-banner');
+        if (!b) {
+            b = document.createElement('div');
+            b.id = 'js-error-banner';
+            b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#7a1020;color:#fff;padding:8px 14px;font:12px Consolas,monospace;white-space:pre-wrap;';
+            (document.body || document.documentElement).appendChild(b);
+        }
+        b.textContent = '⚠ JS错误: ' + (e.message || e) + ' @ ' + (e.filename || '').split('/').pop() + ':' + (e.lineno || 0);
+    }, true);
+    </script>
     <link rel="stylesheet" href="css/style.css">
-    <!-- Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-   
+    <script>if (typeof THREE === 'undefined') document.write('<script src="js/three.min.js"><\/script>');</script>
 </head>
 <body>
-    <!-- 顶部标题 -->
-    <header class="main-header">
-        <h1>🌌 3D天球可视化系统</h1>
-        <p class="subtitle">HYG星表 · 交互式星空探索</p>
-    </header>
 
-    <div class="app-container">
-        <!-- 侧边栏控制面板 -->
-        <aside class="sidebar">
-            <div class="panel">
-                <h3>📊 数据控制</h3>
-                <button id="btn-load" class="btn btn-primary btn-block">
-                    加载HYG星表数据
-                </button>
-                <div id="load-status" class="status-text"></div>
+<!-- 底层：全屏 3D 星空 -->
+<section class="scene-wrap">
+    <div id="placeholder-3d" class="placeholder">🔭 点击左上角 ☰ 打开菜单，加载 HYG 星表数据后开始探索</div>
+    <div id="canvas-container" class="scene-container"></div>
+    <div id="fov-indicator" class="fov-indicator"></div>
+</section>
+
+<!-- 悬浮 HUD 按钮 -->
+<button id="toggle-left"       class="hud-btn" title="打开/收起 控制菜单">☰</button>
+<button id="toggle-fullscreen" class="hud-btn" title="全屏 / 退出全屏">⛶</button>
+<button id="toggle-right"      class="hud-btn" title="打开/收起 数据面板">📊</button>
+
+<!-- 左抽屉 -->
+<aside id="left-drawer" class="drawer left">
+    <div class="drawer-title">🌌 3D 天球可视化系统</div>
+    <div class="panel">
+        <h3>📊 数据控制</h3>
+        <button id="btn-load" class="primary-btn">加载 HYG 星表数据</button>
+        <div id="load-status" class="status-text"></div>
+        <div id="filter-panel" style="display:none">
+            <div class="slider-row">
+                <label for="mag-slider">最大星等: <span id="mag-value">6.00</span></label>
+                <input type="range" id="mag-slider" min="-2" max="6" step="0.1" value="6">
             </div>
-
-            <div class="panel" id="filter-panel" style="display:none;">
-                <h3>🔍 数据筛选</h3>
-                <div class="slider-group">
-                    <label>最大星等: <span id="mag-value">6.00</span></label>
-                    <input type="range" id="mag-slider" min="-1.5" max="6" step="0.05" value="6">
-                </div>
-                <div class="btn-row">
-                    <button id="btn-apply" class="btn btn-success">应用筛选</button>
-                    <button id="btn-reset" class="btn btn-secondary">重置</button>
-                </div>
-                <div id="filter-info" class="filter-info"></div>
+            <div class="time-controls">
+                <button id="btn-apply">应用筛选</button>
+                <button id="btn-reset">重置</button>
             </div>
-
-            <div class="panel" id="stats-panel" style="display:none;">
-                <h3>📈 数据统计</h3>
-                <div class="stats-grid">
-                    <div class="stat-item">
-                        <span class="stat-label">星星总数</span>
-                        <span class="stat-value" id="stat-total">-</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">当前显示</span>
-                        <span class="stat-value" id="stat-current">-</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">平均星等</span>
-                        <span class="stat-value" id="stat-avg-mag">-</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">最亮星等</span>
-                        <span class="stat-value" id="stat-min-mag">-</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">平均距离</span>
-                        <span class="stat-value" id="stat-avg-dist">-</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">星座数量</span>
-                        <span class="stat-value" id="stat-const-count">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h3>🌈 光谱类型</h3>
-                <div id="spectral-legend"></div>
-            </div>
-
-            <div class="panel">
-                <h3>ℹ️ 操作说明</h3>
-                <ul class="help-list">
-                    <li>🖱️ 左键拖拽 - 旋转视角</li>
-                    <li>🖱️ 滚轮 - 缩放</li>
-                    <li>🖱️ 右键拖拽 - 平移</li>
-                    <li>✨ 悬停星星 - 查看详情</li>
-                </ul>
-            </div>
-        </aside>
-
-        <!-- 主内容区 -->
-        <main class="main-content">
-            <!-- 3D视图 -->
-            <section class="section">
-                <h2 class="section-title">3D天球可视化</h2>
-                <div id="canvas-container" class="canvas-container">
-                    <div class="placeholder" id="placeholder-3d">
-                        <p>👈 请先点击左侧"加载HYG星表数据"按钮</p>
-                    </div>
-                </div>
-                <!-- 悬停信息提示 -->
-                <div id="tooltip" class="tooltip" style="display:none;"></div>
-            </section>
-
-            <!-- 2D视图 + 星座统计 -->
-            <section class="section two-col">
-                <div class="col">
-                    <h2 class="section-title">2D坐标视图 (赤经-赤纬)</h2>
-                    <canvas id="chart-2d" width="600" height="400"></canvas>
-                </div>
-                <div class="col">
-                    <h2 class="section-title">星座统计</h2>
-                    <div class="table-container">
-                        <table id="constellation-table">
-                            <thead>
-                                <tr>
-                                    <th>星座</th>
-                                    <th>星数</th>
-                                    <th>最亮</th>
-                                    <th>最暗</th>
-                                    <th>平均</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-            </section>
-
-            <!-- 最亮星星表格 -->
-            <section class="section">
-                <h2 class="section-title">最亮的星星 (Top 15)</h2>
-                <div class="table-container">
-                    <table id="bright-stars-table">
-                        <thead>
-                            <tr>
-                                <th>名称</th>
-                                <th>星座</th>
-                                <th>赤经(h)</th>
-                                <th>赤纬(°)</th>
-                                <th>视星等</th>
-                                <th>绝对星等</th>
-                                <th>光谱</th>
-                                <th>距离(ly)</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-            </section>
-        </main>
+            <div id="filter-info" class="status-text"></div>
+        </div>
     </div>
-
-    <!-- 加载遮罩 -->
-    <div id="loading-overlay" class="loading-overlay" style="display:none;">
-        <div class="spinner"></div>
-        <p>正在加载星表数据...</p>
+    <div class="panel search-panel">
+        <h3>🔍 恒星搜索</h3>
+        <div class="search-row">
+            <input type="text" id="star-search" placeholder="Search star (e.g. Sirius)" autocomplete="off">
+            <button id="search-btn">Search</button>
+        </div>
+        <div id="search-suggestions" class="search-suggestions"></div>
     </div>
+    <div class="panel time-panel">
+        <h3>🕐 观测时间（香港）</h3>
+        <div id="time-display" class="time-display">--</div>
+        <div id="lst-display" class="lst-display">--</div>
+        <div class="time-controls">
+            <button id="time-flow-btn" class="active">▶ 流动</button>
+            <button id="time-pause-btn">⏸ 静止</button>
+            <button id="time-now-btn">回到现在</button>
+        </div>
+        <div class="time-controls">
+            <button data-time-shift="-86400000">-1天</button>
+            <button data-time-shift="-3600000">-1小时</button>
+            <button data-time-shift="3600000">+1小时</button>
+            <button data-time-shift="86400000">+1天</button>
+        </div>
+        <div class="time-controls">
+            <input type="datetime-local" id="time-picker" step="1">
+            <button id="time-apply-btn">应用</button>
+        </div>
+    </div>
+</aside>
 
-    <script src="js/scene3d.js"></script>
-    <script src="js/chart2d.js"></script>
-    <script src="js/app.js"></script>
+<!-- 右抽屉 -->
+<aside id="right-drawer" class="drawer right">
+    <div class="drawer-title">📊 数据面板</div>
+    <div class="panel" id="stats-panel" style="display:none">
+        <h3>📊 统计信息</h3>
+        <div class="stats-grid">
+            <div>总星数: <span id="stat-total">-</span></div>
+            <div>当前显示: <span id="stat-current">-</span></div>
+            <div>平均视星等: <span id="stat-avg-mag">-</span></div>
+            <div>最亮星等: <span id="stat-min-mag">-</span></div>
+            <div>平均距离: <span id="stat-avg-dist">-</span></div>
+            <div>涵盖星座: <span id="stat-const-count">-</span></div>
+        </div>
+    </div>
+    <div class="panel">
+        <h3>📈 2D 赤经-赤纬坐标</h3>
+        <canvas id="chart-2d" width="420" height="240"></canvas>
+    </div>
+    <div class="panel">
+        <h3>🏛 星座统计</h3>
+        <div class="table-wrap">
+            <table id="constellation-table">
+                <thead><tr><th>星座</th><th>星数</th><th>最亮</th><th>最暗</th><th>平均</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+    <div class="panel">
+        <h3>⭐ 最亮恒星 TOP15</h3>
+        <div class="table-wrap">
+            <table id="bright-stars-table">
+                <thead><tr><th>名称</th><th>星座</th><th>赤经h</th><th>赤纬°</th><th>视星等</th><th>绝对星等</th><th>光谱</th><th>距离ly</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+    <div class="panel">
+        <h3>🎨 光谱类型</h3>
+        <div id="spectral-legend" class="spectral-legend"></div>
+    </div>
+</aside>
+
+<div id="loading-overlay" class="loading-overlay" style="display:none">
+    <div class="spinner">⏳ 正在加载星表数据...</div>
+</div>
+<div id="tooltip" class="tooltip"></div>
+
+<script src="js/scene3d.js"></script>
+<script src="js/chart2d.js"></script>
+<script src="js/app.js"></script>
+<script src="js/time.js"></script>
+<script src="js/search.js"></script>
 </body>
 </html>
