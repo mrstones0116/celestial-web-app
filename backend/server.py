@@ -4,7 +4,6 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
-from typing import Optional
 
 app = FastAPI(
     title="3D天球可视化系统 API",
@@ -24,11 +23,7 @@ app.add_middleware(
 # 全局数据加载器实例
 loader = HYGDataLoader()
 
-
-@app.get("/")
-async def root():
-    return {"message": "天球可视化系统 API", "status": "running"}
-
+# 注意：已删除 @app.get("/") 路由，让根路径直接返回 index.html，避免白屏 JSON
 
 @app.get("/api/status")
 async def get_status():
@@ -38,7 +33,6 @@ async def get_status():
         "total_stars": len(loader.df) if loader.df is not None else 0
     }
 
-
 @app.post("/api/load")
 async def load_data():
     """加载HYG星表数据"""
@@ -47,7 +41,6 @@ async def load_data():
         raise HTTPException(status_code=500, detail=result['message'])
     return result
 
-
 @app.get("/api/stars")
 async def get_stars(
     max_mag: float = Query(default=6.0, ge=-2, le=6, description="最大星等")
@@ -55,13 +48,11 @@ async def get_stars(
     """获取星星数据（支持星等筛选）"""
     if not loader.loaded:
         raise HTTPException(status_code=400, detail="数据尚未加载，请先调用 /api/load")
-
     stars = loader.get_stars(max_mag=max_mag)
     return {
         "count": len(stars),
         "stars": stars
     }
-
 
 @app.get("/api/bright-stars")
 async def get_bright_stars(
@@ -70,10 +61,8 @@ async def get_bright_stars(
     """获取亮星标注数据"""
     if not loader.loaded:
         raise HTTPException(status_code=400, detail="数据尚未加载")
-
     stars = loader.get_bright_stars(max_mag=max_mag)
     return {"count": len(stars), "stars": stars}
-
 
 @app.get("/api/stats")
 async def get_stats(
@@ -82,9 +71,7 @@ async def get_stats(
     """获取统计信息"""
     if not loader.loaded:
         raise HTTPException(status_code=400, detail="数据尚未加载")
-
     return loader.get_stats(max_mag=max_mag)
-
 
 @app.get("/api/constellations")
 async def get_constellations(
@@ -93,10 +80,8 @@ async def get_constellations(
     """获取星座统计"""
     if not loader.loaded:
         raise HTTPException(status_code=400, detail="数据尚未加载")
-
     stats = loader.get_constellation_stats(max_mag=max_mag)
     return {"count": len(stats), "constellations": stats}
-
 
 @app.get("/api/top-bright")
 async def get_top_bright(
@@ -106,10 +91,8 @@ async def get_top_bright(
     """获取最亮的星星"""
     if not loader.loaded:
         raise HTTPException(status_code=400, detail="数据尚未加载")
-
     stars = loader.get_top_bright_stars(limit=limit, max_mag=max_mag)
     return {"count": len(stars), "stars": stars}
-
 
 @app.get("/api/spectral-info")
 async def get_spectral_info():
@@ -118,7 +101,6 @@ async def get_spectral_info():
         "colors": HYGDataLoader.SPECTRAL_COLORS,
         "info": HYGDataLoader.SPECTRAL_INFO
     }
-
 
 if __name__ == "__main__":
     import uvicorn

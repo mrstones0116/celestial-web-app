@@ -18,26 +18,30 @@
     }, true);
     </script>
     <link rel="stylesheet" href="css/style.css">
+    <!-- Three.js：CDN 优先，离线时回退本地 js/three.min.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>if (typeof THREE === 'undefined') document.write('<script src="js/three.min.js"><\/script>');</script>
 </head>
 <body>
 
-<!-- 底层：全屏 3D 星空 -->
+<!-- ===== 底层：全屏 3D 星空（永远铺满窗口） ===== -->
 <section class="scene-wrap">
     <div id="placeholder-3d" class="placeholder">🔭 点击左上角 ☰ 打开菜单，加载 HYG 星表数据后开始探索</div>
     <div id="canvas-container" class="scene-container"></div>
     <div id="fov-indicator" class="fov-indicator"></div>
 </section>
 
-<!-- 悬浮 HUD 按钮 -->
+<!-- ===== 悬浮 HUD 按钮（z-index 最高，永远可点） ===== -->
 <button id="toggle-left"       class="hud-btn" title="打开/收起 控制菜单">☰</button>
-<button id="toggle-fullscreen" class="hud-btn" title="全屏 / 退出全屏">⛶</button>
+<button id="toggle-fullscreen" class="hud-btn" title="全屏 / 窗口模式">⛶</button>
 <button id="toggle-right"      class="hud-btn" title="打开/收起 数据面板">📊</button>
+<button id="quit-app"          class="hud-btn" title="退出程序">✕</button>
 
-<!-- 左抽屉 -->
+<!-- ===== 左抽屉：控制菜单 ===== -->
 <aside id="left-drawer" class="drawer left">
     <div class="drawer-title">🌌 3D 天球可视化系统</div>
+
+    <!-- 数据控制 -->
     <div class="panel">
         <h3>📊 数据控制</h3>
         <button id="btn-load" class="primary-btn">加载 HYG 星表数据</button>
@@ -54,6 +58,18 @@
             <div id="filter-info" class="status-text"></div>
         </div>
     </div>
+
+    <!-- 显示控制 -->
+    <div class="panel">
+        <h3>👁 显示控制</h3>
+        <label class="toggle-row"><input type="checkbox" id="toggle-ground" checked> 地景（地面 / 地平线 / 方位）</label>
+        <label class="toggle-row"><input type="checkbox" id="toggle-labels" checked> 星星名称</label>
+        <label class="toggle-row"><input type="checkbox" id="toggle-lines" checked> 星座连线</label>
+        <label class="toggle-row"><input type="checkbox" id="toggle-grid" checked> 赤经赤纬网格</label>
+        <label class="toggle-row"><input type="checkbox" id="toggle-const-names" checked> 星座名称（天区）</label>
+    </div>
+
+    <!-- 恒星搜索 -->
     <div class="panel search-panel">
         <h3>🔍 恒星搜索</h3>
         <div class="search-row">
@@ -62,10 +78,13 @@
         </div>
         <div id="search-suggestions" class="search-suggestions"></div>
     </div>
+
+    <!-- 观测时间 + Epoch 时间旅行 -->
     <div class="panel time-panel">
         <h3>🕐 观测时间（香港）</h3>
         <div id="time-display" class="time-display">--</div>
         <div id="lst-display" class="lst-display">--</div>
+        <div id="epoch-display" class="lst-display">渲染历元: 公元 2000 年</div>
         <div class="time-controls">
             <button id="time-flow-btn" class="active">▶ 流动</button>
             <button id="time-pause-btn">⏸ 静止</button>
@@ -78,15 +97,50 @@
             <button data-time-shift="86400000">+1天</button>
         </div>
         <div class="time-controls">
+            <button data-time-shift="-31557600000000">-1000年</button>
+            <button data-time-shift="-3155760000000">-100年</button>
+            <button data-time-shift="3155760000000">+100年</button>
+            <button data-time-shift="31557600000000">+1000年</button>
+        </div>
+        <div class="time-controls">
             <input type="datetime-local" id="time-picker" step="1">
             <button id="time-apply-btn">应用</button>
         </div>
     </div>
+
+     <!-- 观测位置 -->
+    <div class="panel">
+        <h3>📍 观测位置</h3>
+        <div class="loc-row">
+            <label>纬度<input type="number" id="loc-lat" step="0.01" min="-90" max="90" value="22.32"></label>
+            <label>经度<input type="number" id="loc-lon" step="0.01" min="-180" max="180" value="114.17"></label>
+        </div>
+        <div class="time-controls">
+            <select id="loc-preset">
+                <option value="22.32,114.17">香港</option>
+                <option value="39.90,116.40">北京</option>
+                <option value="31.23,121.47">上海</option>
+                <option value="25.03,121.56">台北</option>
+                <option value="35.68,139.69">东京</option>
+                <option value="40.71,-74.00">纽约</option>
+                <option value="51.50,-0.12">伦敦</option>
+                <option value="-33.87,151.21">悉尼</option>
+                <option value="0,0">赤道 (0°, 0°)</option>
+                <option value="90,0">北极 (90°N)</option>
+                <option value="-90,0">南极 (90°S)</option>
+            </select>
+            <button id="loc-apply">应用</button>
+            <button id="loc-gps">GPS</button>
+        </div>
+        <div id="loc-info" class="status-text">香港 (22.32°N, 114.17°E)</div>
+    </div>
 </aside>
 
-<!-- 右抽屉 -->
+<!-- ===== 右抽屉：数据面板 ===== -->
 <aside id="right-drawer" class="drawer right">
     <div class="drawer-title">📊 数据面板</div>
+
+    <!-- 统计信息 -->
     <div class="panel" id="stats-panel" style="display:none">
         <h3>📊 统计信息</h3>
         <div class="stats-grid">
@@ -98,10 +152,14 @@
             <div>涵盖星座: <span id="stat-const-count">-</span></div>
         </div>
     </div>
+
+    <!-- 2D 图表 -->
     <div class="panel">
         <h3>📈 2D 赤经-赤纬坐标</h3>
         <canvas id="chart-2d" width="420" height="240"></canvas>
     </div>
+
+    <!-- 星座统计 -->
     <div class="panel">
         <h3>🏛 星座统计</h3>
         <div class="table-wrap">
@@ -111,6 +169,8 @@
             </table>
         </div>
     </div>
+
+    <!-- 最亮恒星 -->
     <div class="panel">
         <h3>⭐ 最亮恒星 TOP15</h3>
         <div class="table-wrap">
@@ -120,17 +180,21 @@
             </table>
         </div>
     </div>
+
+    <!-- 光谱图例 -->
     <div class="panel">
         <h3>🎨 光谱类型</h3>
         <div id="spectral-legend" class="spectral-legend"></div>
     </div>
 </aside>
 
+<!-- ===== 加载遮罩 & 悬停提示 ===== -->
 <div id="loading-overlay" class="loading-overlay" style="display:none">
     <div class="spinner">⏳ 正在加载星表数据...</div>
 </div>
 <div id="tooltip" class="tooltip"></div>
 
+<!-- ⚠️ 脚本顺序不可调换：scene3d → chart2d → app → time → search -->
 <script src="js/scene3d.js"></script>
 <script src="js/chart2d.js"></script>
 <script src="js/app.js"></script>

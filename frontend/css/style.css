@@ -21,10 +21,12 @@ body { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; ba
     border: 1px solid #2a3050; background: rgba(16,20,42,.72); color: #7fd4ff;
     font-size: 1.05rem; cursor: pointer; transition: all .2s; }
 .hud-btn:hover { background: #2a4a9f; color: #fff; border-color: #4a7dff; }
-#toggle-left { left: 12px; }
+#toggle-left       { left: 12px; }
 #toggle-fullscreen { left: 60px; }
-#toggle-right { right: 12px; }
-
+#toggle-right      { right: 60px; }
+/* 红色 ✕ = 退出程序（右上角，界面上唯一的 ✕） */
+#quit-app { right: 12px; background: rgba(122,16,32,.85); border-color: #ff4444; color: #fff; }
+#quit-app:hover { background: #aa2030; box-shadow: 0 0 12px rgba(255,68,68,.6); }
 /* ===== 抽屉 ===== */
 .drawer { position: fixed; top: 0; bottom: 0; z-index: 100; width: 320px; padding: 60px 12px 12px;
     display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
@@ -100,3 +102,16 @@ tr:hover { background: rgba(74,144,226,.1); }
 .loading-overlay .spinner { background: #141a35; border: 1px solid #4a7dff; color: #e8ecff;
     padding: 14px 26px; border-radius: 10px; font-size: .95rem; animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: .6; } 50% { opacity: 1; } }
+
+/* ===== 观测位置 ===== */
+.loc-row { display: flex; gap: 8px; }
+.loc-row label { flex: 1; font-size: .75rem; color: #cfd6ff; display: flex; flex-direction: column; gap: 3px; }
+.loc-row input { background: #0b0e1a; color: #e8ecff; border: 1px solid #2a3050;
+    border-radius: 5px; padding: 4px 6px; font-size: .8rem; }
+#loc-preset { flex: 1; background: #0b0e1a; color: #e8ecff; border: 1px solid #2a3050;
+    border-radius: 5px; padding: 3px 6px; font-size: .75rem; }
+
+/* ===== 显示控制开关 ===== */
+.toggle-row { display: flex; align-items: center; gap: 8px; font-size: .8rem;
+    color: #cfd6ff; padding: 4px 0; cursor: pointer; }
+.toggle-row input { accent-color: #4A90E2; width: 16px; height: 16px; cursor: pointer; }

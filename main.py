@@ -69,7 +69,19 @@ def _run_server(port):
         uvicorn.run(fastapi_app, host="127.0.0.1", port=port, log_level="warning")
     except Exception:
         _server_error.append(traceback.format_exc())
+        
+# ===== 暴露给前端 JS 的原生能力 =====
+class Api:
+    def quit(self):
+        """红色 ✕：强制结束整个程序"""
+        os._exit(0)
 
+    def toggle_fullscreen(self):
+        """⛶：切换窗口全屏 / 还原"""
+        try:
+            webview.windows[0].toggle_fullscreen()
+        except Exception:
+            pass
 
 def main():
     port = 8000
@@ -87,10 +99,11 @@ def main():
 
     webview.create_window(
         title='3D Celestial Sphere - AI Stargazing',
-        url=f'http://127.0.0.1:{port}/index.html',  # <--- 这里加上 /index.html
+        url=f'http://127.0.0.1:{port}/index.html',
         fullscreen=True,
         resizable=True,
         text_select=True,
+        js_api=Api(),          # ← 新增这一行
     )
     webview.start()
     print("👋 应用已关闭。")

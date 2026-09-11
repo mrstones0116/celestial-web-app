@@ -1,7 +1,8 @@
 /**
  * app.js - 主应用逻辑
- * API 使用相对路径，自动适配启动器动态端口，杜绝端口错配
+ * API 使用相对路径，自动适配启动器动态端口
  */
+const API_BASE = ''; // 相对路径，杜绝端口错配
 let scene3d = null;
 let chart2d = null;
 
@@ -13,36 +14,77 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function setupEventListeners() {
-    document.getElementById('btn-load').addEventListener('click', loadData);
-    document.getElementById('btn-apply').addEventListener('click', applyFilter);
-    document.getElementById('btn-reset').addEventListener('click', resetFilter);
+    const btnLoad = document.getElementById('btn-load');
+    if (btnLoad) btnLoad.addEventListener('click', loadData);
+    
+    const btnApply = document.getElementById('btn-apply');
+    if (btnApply) btnApply.addEventListener('click', applyFilter);
+    
+    const btnReset = document.getElementById('btn-reset');
+    if (btnReset) btnReset.addEventListener('click', resetFilter);
+    
     const slider = document.getElementById('mag-slider');
-    slider.addEventListener('input', () => {
-        document.getElementById('mag-value').textContent = parseFloat(slider.value).toFixed(2);
-    });
+    if (slider) {
+        slider.addEventListener('input', () => {
+            const valEl = document.getElementById('mag-value');
+            if (valEl) valEl.textContent = parseFloat(slider.value).toFixed(2);
+        });
+    }
 }
 
-/* ===== 抽屉菜单 + 全屏 ===== */
+/* ===== 抽屉菜单 + 全屏 + 退出程序 + 显示控制 ===== */
 function setupUI() {
     const left  = document.getElementById('left-drawer');
     const right = document.getElementById('right-drawer');
     const bL = document.getElementById('toggle-left');
     const bR = document.getElementById('toggle-right');
     const bF = document.getElementById('toggle-fullscreen');
+    const bQ = document.getElementById('quit-app');
+
     const sync = () => {
-        bL.textContent = left.classList.contains('open')  ? '✕' : '☰';
-        bR.textContent = right.classList.contains('open') ? '✕' : '📊';
+        if (bL && left)  bL.textContent = left.classList.contains('open')  ? '◀' : '☰';
+        if (bR && right) bR.textContent = right.classList.contains('open') ? '▶' : '📊';
     };
-    bL.addEventListener('click', () => { left.classList.toggle('open');  sync(); });
-    bR.addEventListener('click', () => { right.classList.toggle('open'); sync(); });
-    bF.addEventListener('click', () => {
-        if (!document.fullscreenElement) {
-            const p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
-            if (p && p.catch) p.catch(() => {});
-        } else if (document.exitFullscreen) {
-            document.exitFullscreen();
-        }
-    });
+    if (bL && left)  bL.addEventListener('click', () => { left.classList.toggle('open');  sync(); });
+    if (bR && right) bR.addEventListener('click', () => { right.classList.toggle('open'); sync(); });
+
+    // ⛶ 全屏切换
+    if (bF) {
+        bF.addEventListener('click', () => {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.toggle_fullscreen) {
+                window.pywebview.api.toggle_fullscreen();
+            } else if (!document.fullscreenElement) {
+                const p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+                if (p && p.catch) p.catch(() => {});
+            } else if (document.exitFullscreen) {
+                document.exitFullscreen();
+            }
+        });
+    }
+
+    // 红色 ✕ 强制结束程序
+    if (bQ) {
+        bQ.addEventListener('click', () => {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.quit) {
+                window.pywebview.api.quit();
+            } else {
+                window.close();
+            }
+        });
+    }
+
+    // ===== 显示控制开关 =====
+    const gT = document.getElementById('toggle-ground');
+    const lT = document.getElementById('toggle-labels');
+    const nT = document.getElementById('toggle-lines');
+    const cT = document.getElementById('toggle-const-names');
+    const grT = document.getElementById('toggle-grid');
+    if (grT) grT.onchange = () => { if (window.celestialScene) window.celestialScene.setGridVisible(grT.checked); };
+    if (gT) gT.onchange = () => { if (scene3d) scene3d.setGroundVisible(gT.checked); };
+    if (lT) lT.onchange = () => { if (scene3d) scene3d.setLabelsVisible(lT.checked); };
+    if (nT) nT.onchange = () => { if (scene3d) scene3d.setLinesVisible(nT.checked); };
+    if (cT) cT.onchange = () => { if (scene3d) scene3d.setConstNamesVisible(cT.checked); };
+
     sync();
 }
 
@@ -50,29 +92,42 @@ function setupUI() {
 async function loadData() {
     showLoading(true);
     const statusEl = document.getElementById('load-status');
-    statusEl.textContent = '正在加载 HYG 星表数据...';
+    if (statusEl) statusEl.textContent = '正在加载 HYG 星表数据...';
     try {
-        const res  = await fetch('/api/load', { method: 'POST' });
+        const res  = await fetch(`${API_BASE}/api/load`, { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-            statusEl.textContent = `✅ ${data.message}`;
-            statusEl.style.color = '#27ae60';
-            document.getElementById('filter-panel').style.display = 'block';
-            document.getElementById('stats-panel').style.display  = 'block';
-            document.getElementById('placeholder-3d').style.display = 'none';
+            if (statusEl) {
+                statusEl.textContent = `✅ ${data.message}`;
+                statusEl.style.color = '#27ae60';
+            }
+            const fp = document.getElementById('filter-panel');
+            const sp = document.getElementById('stats-panel');
+            const ph = document.getElementById('placeholder-3d');
+            if (fp) fp.style.display = 'block';
+            if (sp) sp.style.display  = 'block';
+            if (ph) ph.style.display = 'none';
+
             if (!scene3d) {
                 scene3d = new CelestialScene3D('canvas-container');
                 window.celestialScene = scene3d;
                 scene3d.init();
             }
             await refreshData(6.0);
+
+            // 加载 88 星座标准连线（本地优先/在线回退/非阻塞）
+            if (scene3d.loadConstellationLines) scene3d.loadConstellationLines();
         } else {
-            statusEl.textContent = `❌ ${data.message}`;
-            statusEl.style.color = '#e74c3c';
+            if (statusEl) {
+                statusEl.textContent = `❌ ${data.message}`;
+                statusEl.style.color = '#e74c3c';
+            }
         }
     } catch (err) {
-        statusEl.textContent = `❌ 请求失败: ${err.message}`;
-        statusEl.style.color = '#e74c3c';
+        if (statusEl) {
+            statusEl.textContent = `❌ 请求失败: ${err.message}`;
+            statusEl.style.color = '#e74c3c';
+        }
     } finally {
         showLoading(false);
     }
@@ -82,11 +137,11 @@ async function loadData() {
 async function refreshData(maxMag) {
     try {
         const [starsRes, brightRes, statsRes, constRes, topRes] = await Promise.all([
-            fetch(`/api/stars?max_mag=${maxMag}`),
-            fetch('/api/bright-stars?max_mag=2.5'),
-            fetch(`/api/stats?max_mag=${maxMag}`),
-            fetch(`/api/constellations?max_mag=${maxMag}`),
-            fetch(`/api/top-bright?limit=15&max_mag=${maxMag}`)
+            fetch(`${API_BASE}/api/stars?max_mag=${maxMag}`),
+            fetch(`${API_BASE}/api/bright-stars?max_mag=2.5`),
+            fetch(`${API_BASE}/api/stats?max_mag=${maxMag}`),
+            fetch(`${API_BASE}/api/constellations?max_mag=${maxMag}`),
+            fetch(`${API_BASE}/api/top-bright?limit=15&max_mag=${maxMag}`)
         ]);
         const starsData  = await starsRes.json();
         const brightData = await brightRes.json();
@@ -95,58 +150,80 @@ async function refreshData(maxMag) {
         const topData    = await topRes.json();
 
         if (scene3d) scene3d.updateStars(starsData.stars, brightData.stars);
-        chart2d.draw(starsData.stars);
+        if (chart2d) chart2d.draw(starsData.stars);
+
         updateStats(statsData);
         updateConstellationTable(constData.constellations);
         updateBrightStarsTable(topData.stars);
-        document.getElementById('filter-info').textContent =
-            `当前显示: ${statsData.current_count} / ${statsData.total_stars} 颗星`;
+
+        const filterInfo = document.getElementById('filter-info');
+        if (filterInfo) filterInfo.textContent = `当前显示: ${statsData.current_count} / ${statsData.total_stars} 颗星`;
     } catch (err) {
         console.error('刷新数据失败:', err);
     }
 }
 
 function applyFilter() {
-    refreshData(parseFloat(document.getElementById('mag-slider').value));
+    const slider = document.getElementById('mag-slider');
+    if (slider) refreshData(parseFloat(slider.value));
 }
 function resetFilter() {
-    document.getElementById('mag-slider').value = 6;
-    document.getElementById('mag-value').textContent = '6.00';
+    const slider = document.getElementById('mag-slider');
+    const magValue = document.getElementById('mag-value');
+    if (slider) slider.value = 6;
+    if (magValue) magValue.textContent = '6.00';
     refreshData(6.0);
 }
 
 function updateStats(s) {
-    document.getElementById('stat-total').textContent       = s.total_stars;
-    document.getElementById('stat-current').textContent     = s.current_count;
-    document.getElementById('stat-avg-mag').textContent     = s.avg_mag;
-    document.getElementById('stat-min-mag').textContent     = s.min_mag;
-    document.getElementById('stat-avg-dist').textContent    = `${s.avg_dist_ly} ly`;
-    document.getElementById('stat-const-count').textContent = s.constellation_count;
+    const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setTxt('stat-total', s.total_stars);
+    setTxt('stat-current', s.current_count);
+    setTxt('stat-avg-mag', s.avg_mag);
+    setTxt('stat-min-mag', s.min_mag);
+    setTxt('stat-avg-dist', `${s.avg_dist_ly} ly`);
+    setTxt('stat-const-count', s.constellation_count);
 }
+
 function updateConstellationTable(list) {
-    document.querySelector('#constellation-table tbody').innerHTML =
-        list.slice(0, 30).map(c => `<tr><td>${c.constellation}</td><td>${c.star_count}</td><td>${c.brightest_mag}</td><td>${c.dimmest_mag}</td><td>${c.avg_mag}</td></tr>`).join('');
+    const tbody = document.querySelector('#constellation-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = (list || []).slice(0, 30).map(c =>
+        `<tr><td>${c.constellation}</td><td>${c.star_count}</td><td>${c.brightest_mag}</td><td>${c.dimmest_mag}</td><td>${c.avg_mag}</td></tr>`
+    ).join('');
 }
+
 function updateBrightStarsTable(stars) {
-    document.querySelector('#bright-stars-table tbody').innerHTML =
-        stars.map(s => `<tr><td>${s.name}</td><td>${s.constellation}</td><td>${s.ra_hours}</td><td>${s.dec}</td><td>${s.mag}</td><td>${s.absmag ?? '-'}</td><td>${s.spect}</td><td>${s.dist_ly}</td></tr>`).join('');
+    const tbody = document.querySelector('#bright-stars-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = (stars || []).map(s =>
+        `<tr><td>${s.name}</td><td>${s.constellation}</td><td>${s.ra_hours}</td><td>${s.dec}</td><td>${s.mag}</td><td>${s.absmag ?? '-'}</td><td>${s.spect}</td><td>${s.dist_ly}</td></tr>`
+    ).join('');
 }
 
 async function loadSpectralInfo() {
     try {
-        const res  = await fetch('/api/spectral-info');
+        const res  = await fetch(`${API_BASE}/api/spectral-info`);
         const data = await res.json();
-        document.getElementById('spectral-legend').innerHTML =
-            Object.entries(data.info).map(([key, info]) => `
-                <div class="spectral-item">
-                    <span class="spectral-dot" style="background:${info.color}"></span>
-                    <span>${info.name} - ${info.color_name} ${info.temp}</span>
-                </div>`).join('');
+        const legend = document.getElementById('spectral-legend');
+        if (!legend) return;
+        legend.innerHTML = Object.entries(data.info).map(([key, info]) => `
+            <div class="spectral-item">
+                <span class="spectral-dot" style="background:${info.color}"></span>
+                <span>${info.name} - ${info.color_name} ${info.temp}</span>
+            </div>`).join('');
     } catch (err) {
         console.log('光谱信息API未就绪');
     }
 }
 
+// ===== Epoch 时间旅行：年份变化时本地重建 3D 星空 + 重画 2D 图 =====
+window.refreshEpochAll = function () {
+    if (scene3d && scene3d.refreshEpoch) scene3d.refreshEpoch();
+    if (chart2d && scene3d && scene3d.starData) chart2d.draw(scene3d.starData);
+};
+
 function showLoading(show) {
-    document.getElementById('loading-overlay').style.display = show ? 'flex' : 'none';
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) overlay.style.display = show ? 'flex' : 'none';
 }
