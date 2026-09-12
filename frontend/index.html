@@ -79,33 +79,67 @@
         <div id="search-suggestions" class="search-suggestions"></div>
     </div>
 
-    <!-- 观测时间 + Epoch 时间旅行 -->
+    <!-- 收藏夹 -->
+    <div class="panel">
+        <h3>⭐ 收藏夹</h3>
+        <div id="favorites-list" class="favorites-list">
+            <div class="fav-empty">暂无收藏</div>
+        </div>
+    </div>
+
+    <!-- 观测时间（仿 Stellarium）-->
     <div class="panel time-panel">
-        <h3>🕐 观测时间（香港）</h3>
-        <div id="time-display" class="time-display">--</div>
-        <div id="lst-display" class="lst-display">--</div>
-        <div id="epoch-display" class="lst-display">渲染历元: 公元 2000 年</div>
-        <div class="time-controls">
-            <button id="time-flow-btn" class="active">▶ 流动</button>
-            <button id="time-pause-btn">⏸ 静止</button>
-            <button id="time-now-btn">回到现在</button>
+        <h3>🕐 观测时间（HKT）</h3>
+        <div class="time-editor">
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="year" data-dir="1">▲</button>
+                <input type="number" id="time-year" class="time-input">
+                <button class="time-step-btn" data-comp="year" data-dir="-1">▼</button>
+                <span class="time-unit">年</span>
+            </div>
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="month" data-dir="1">▲</button>
+                <input type="number" id="time-month" class="time-input" min="1" max="12">
+                <button class="time-step-btn" data-comp="month" data-dir="-1">▼</button>
+                <span class="time-unit">月</span>
+            </div>
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="day" data-dir="1">▲</button>
+                <input type="number" id="time-day" class="time-input" min="1" max="31">
+                <button class="time-step-btn" data-comp="day" data-dir="-1">▼</button>
+                <span class="time-unit">日</span>
+            </div>
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="hour" data-dir="1">▲</button>
+                <input type="number" id="time-hour" class="time-input" min="0" max="23">
+                <button class="time-step-btn" data-comp="hour" data-dir="-1">▼</button>
+                <span class="time-unit">时</span>
+            </div>
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="minute" data-dir="1">▲</button>
+                <input type="number" id="time-minute" class="time-input" min="0" max="59">
+                <button class="time-step-btn" data-comp="minute" data-dir="-1">▼</button>
+                <span class="time-unit">分</span>
+            </div>
+            <div class="time-field">
+                <button class="time-step-btn" data-comp="second" data-dir="1">▲</button>
+                <input type="number" id="time-second" class="time-input" min="0" max="59">
+                <button class="time-step-btn" data-comp="second" data-dir="-1">▼</button>
+                <span class="time-unit">秒</span>
+            </div>
         </div>
-        <div class="time-controls">
-            <button data-time-shift="-86400000">-1天</button>
-            <button data-time-shift="-3600000">-1小时</button>
-            <button data-time-shift="3600000">+1小时</button>
-            <button data-time-shift="86400000">+1天</button>
+        <div class="time-flow-controls">
+            <span class="time-flow-label">流速:</span>
+            <button class="flow-rate-btn" data-rate="0">⏸</button>
+            <button class="flow-rate-btn" data-rate="0.5">0.5x</button>
+            <button class="flow-rate-btn active" data-rate="1">1x</button>
+            <button class="flow-rate-btn" data-rate="2">2x</button>
+            <button class="flow-rate-btn" data-rate="5">5x</button>
+            <button class="flow-rate-btn" data-rate="10">10x</button>
         </div>
-        <div class="time-controls">
-            <button data-time-shift="-31557600000000">-1000年</button>
-            <button data-time-shift="-3155760000000">-100年</button>
-            <button data-time-shift="3155760000000">+100年</button>
-            <button data-time-shift="31557600000000">+1000年</button>
-        </div>
-        <div class="time-controls">
-            <input type="datetime-local" id="time-picker" step="1">
-            <button id="time-apply-btn">应用</button>
-        </div>
+        <button id="time-now-btn" class="primary-btn" style="margin-top:8px;">回到现在</button>
+        <div id="lst-display" class="lst-display">LST: --</div>
+        <div id="epoch-display" class="lst-display">历元: --</div>
     </div>
 
      <!-- 观测位置 -->
@@ -190,7 +224,7 @@
 
 <!-- ===== 加载遮罩 & 悬停提示 ===== -->
 <div id="loading-overlay" class="loading-overlay" style="display:none">
-    <div class="spinner">⏳ 正在加载星表数据...</div>
+    <div class="spinner">⏳</div>
 </div>
 <div id="tooltip" class="tooltip"></div>
 

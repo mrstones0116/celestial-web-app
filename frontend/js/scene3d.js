@@ -4,29 +4,6 @@
  * 东=+X, 天顶=+Y, 北=-Z；地平圈/NESW 标记固定不随时间转
  */
 
-// ===== 星座骨架线数据（星名对；匹配不到的自动跳过）=====
-const CONSTELLATION_LINES = {
-  'Orion': [['Betelgeuse','Bellatrix'],['Betelgeuse','Alnitak'],['Bellatrix','Mintaka'],['Mintaka','Alnilam'],['Alnilam','Alnitak'],['Mintaka','Rigel'],['Alnitak','Saiph'],['Rigel','Saiph']],
-  'Ursa Major': [['Dubhe','Merak'],['Merak','Phecda'],['Phecda','Megrez'],['Megrez','Dubhe'],['Megrez','Alioth'],['Alioth','Mizar'],['Mizar','Alkaid']],
-  'Cassiopeia': [['Caph','Schedar'],['Schedar','Ruchbah'],['Ruchbah','Segin']],
-  'Cygnus': [['Deneb','Sadr'],['Sadr','Albireo'],['Sadr','Gienah']],
-  'Lyra': [['Vega','Sheliak'],['Sheliak','Sulafat'],['Sulafat','Vega']],
-  'Aquila': [['Tarazed','Altair'],['Altair','Alshain']],
-  'Canis Major': [['Mirzam','Sirius'],['Sirius','Wezen'],['Wezen','Adhara'],['Wezen','Aludra']],
-  'Canis Minor': [['Procyon','Gomeisa']],
-  'Pegasus': [['Markab','Scheat'],['Scheat','Alpheratz'],['Alpheratz','Algenib'],['Algenib','Markab']],
-  'Andromeda': [['Alpheratz','Mirach'],['Mirach','Almach']],
-  'Perseus': [['Mirfak','Algol']],
-  'Auriga': [['Capella','Menkalinan']],
-  'Bootes': [['Arcturus','Izar']],
-  'Scorpius': [['Dschubba','Antares'],['Antares','Sargas'],['Sargas','Shaula']],
-  'Leo': [['Regulus','Algieba'],['Denebola','Zosma']],
-  'Virgo': [['Spica','Vindemiatrix']],
-  'Gemini': [['Castor','Pollux']],
-  'Taurus': [['Aldebaran','Elnath']],
-  'Crux': [['Acrux','Gacrux']]
-};
-
 // ===== 行星轨道根数（JPL 近似表 1800-2050 AD）：[值, 每世纪变化率] =====
 const PLANET_ELEMENTS = {
   Mercury:{a:[0.38709927,0.00000037],e:[0.20563593,0.00001906],I:[7.00497902,-0.00594749],L:[252.25032350,149472.67411175],w:[77.45779628,0.16047689],O:[48.33076593,-0.12534081]},
@@ -54,11 +31,11 @@ class CelestialScene3D {
         this.starData = []; this.starLayers = []; this.labels = [];
         this.animationId = null;
         this.circleTexture = this._createCircleTexture();
-        this.fovDefault = 60; this.fovMin = 10; this.fovMax = 110; this.fovStep = 3;
+        this.fovDefault = 60; this.fovMin = 4; this.fovMax = 110; this.fovStep = 3;
         this.theta = Math.PI / 2;   // 地平系方位朝向
         this.phi = Math.PI / 2;     // 地平系天顶角
         this.rotateSpeed = 0.003;
-        this.isDragging = false; this.lastMouseX = 0; this.lastMouseY = 0;
+        this.isDragging = false; this.lastMouseX = 0; this.lastMouseY = 0;this._mouseDownX = 0; this._mouseDownY = 0;
         this._focusAnim = null;
         this.constellationLines = null;
         this._labelsVisible = true;
@@ -145,12 +122,12 @@ class CelestialScene3D {
         canvas.addEventListener('mousedown', (e) => {
             this.isDragging = true;
             this.lastMouseX = e.clientX; this.lastMouseY = e.clientY;
+            this._mouseDownX = e.clientX; this._mouseDownY = e.clientY;
             this._focusAnim = null;
             canvas.style.cursor = 'grabbing';
         });
         canvas.addEventListener('mousemove', (e) => {
-            this._updateRaycast(e);
-            if (!this.isDragging) return;
+            if (!this.isDragging) return;   // 已移除悬浮提示，改为点击显示
             const dx = e.clientX - this.lastMouseX;
             const dy = e.clientY - this.lastMouseY;
             this.theta += dx * this.rotateSpeed;
@@ -164,6 +141,13 @@ class CelestialScene3D {
             this.isDragging = false;
             canvas.style.cursor = 'grab';
         });
+        // 点击检测：区分"点击"与"拖拽后释放"
+        canvas.addEventListener('click', (e) => {
+            const dx = e.clientX - this._mouseDownX;
+            const dy = e.clientY - this._mouseDownY;
+            if (Math.sqrt(dx*dx + dy*dy) > 5) return;   // 拖拽，不触发
+            this._onClickRaycast(e);
+        });
         canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
             const dir = e.deltaY > 0 ? 1 : -1;
@@ -171,7 +155,7 @@ class CelestialScene3D {
                 Math.min(this.fovMax, this.camera.fov + dir * this.fovStep));
             this.camera.updateProjectionMatrix();
             this._updateStarSizes();
-            this._applyLabelLOD();   // FOV 变化 → 更新星名可见深度
+            this._applyLabelLOD();
             const ind = document.getElementById('fov-indicator');
             if (ind) { ind.textContent = `FOV: ${this.camera.fov.toFixed(0)}°`; ind.style.display = 'block'; }
         }, { passive: false });
@@ -266,6 +250,146 @@ class CelestialScene3D {
         } else {
             tooltip.style.display = 'none';
         }
+    }
+
+    // ===== 点击检测：恒星 + 太阳系天体，显示详细信息 =====
+    _onClickRaycast(event) {
+        const rect = this.container.getBoundingClientRect();
+        this.mouse.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+        this.mouse.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        this.raycaster.params.Points.threshold = 0.02;
+
+        // 1. 检测恒星
+        let hitStar = null, hitStarDist = Infinity;
+        for (const layer of this.starLayers) {
+            if (!layer.geometry.attributes.position || layer.material.opacity < 0.5) continue;
+            const hits = this.raycaster.intersectObject(layer);
+            if (hits.length > 0 && hits[0].distance < hitStarDist) {
+                hitStarDist = hits[0].distance;
+                hitStar = this._findNearestStar(layer.worldToLocal(hits[0].point.clone()));
+            }
+        }
+
+        // 2. 检测太阳系天体（角度匹配）
+        let hitBody = null, hitBodyAngle = Infinity;
+        const checkBody = (obj, type, name) => {
+            if (!obj || !obj.visible) return;
+            const wp = obj.getWorldPosition(new THREE.Vector3());
+            const toObj = wp.clone().sub(this.raycaster.ray.origin).normalize();
+            const ang = this.raycaster.ray.direction.angleTo(toObj);
+            if (ang < 0.05 && ang < hitBodyAngle) {
+                hitBodyAngle = ang;
+                hitBody = { type, name, worldPos: wp };
+            }
+        };
+        if (this.sunGroup) checkBody(this.sunGroup, 'sun', 'Sun');
+        if (this.moonGroup) checkBody(this.moonGroup, 'moon', 'Moon');
+        if (this.solarBodies) {
+            for (const key of Object.keys(this.solarBodies)) {
+                checkBody(this.solarBodies[key].dot, 'planet', PLANET_DISPLAY[key].label);
+            }
+        }
+
+        // 3. 优先显示太阳系天体（更近），否则恒星
+        if (hitBody) {
+            const { az, alt } = this._calcAzAlt(hitBody.worldPos);
+            this._showInfoPanel({
+                type: hitBody.type, name: hitBody.name,
+                az, alt
+            });
+        } else if (hitStar) {
+            this.showStarInfo(hitStar);   // 与搜索走同一方法
+        }else {
+            this._hideInfoPanel(); // 点击空白处关闭面板
+        }
+    }
+
+    // ===== 由地平场景坐标计算方位角/高度角 =====
+    _calcAzAlt(worldPos) {
+        const v = worldPos.clone().normalize();
+        const alt = Math.asin(THREE.MathUtils.clamp(v.y, -1, 1));
+        let az = Math.atan2(v.x, -v.z); // 北 = -Z
+        if (az < 0) az += 2 * Math.PI;
+        return { az: az * 180 / Math.PI, alt: alt * 180 / Math.PI };
+    }
+
+    // ===== 信息面板 =====
+    _ensureInfoPanelStyle() {
+        if (document.getElementById('info-panel-style')) return;
+        const style = document.createElement('style');
+        style.id = 'info-panel-style';
+        style.textContent = `
+            #info-panel {
+                position: fixed; top: 60px; right: 20px; width: 280px;
+                background: rgba(20,25,40,0.95); border: 1px solid #4A90E2;
+                border-radius: 8px; padding: 16px; font-size: 0.85rem; color: #ccc;
+                z-index: 1001; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            }
+            #info-panel h4 { color: #4A90E2; margin: 0 0 10px 0; font-size: 1.1rem; }
+            #info-panel .info-row { margin: 4px 0; }
+            #info-panel .info-label { color: #888; }
+            #info-panel .info-close {
+                position: absolute; top: 8px; right: 12px; cursor: pointer;
+                color: #888; font-size: 1rem;
+            }
+            #info-panel .info-close:hover { color: #fff; }
+            #info-panel .fav-btn {
+                margin-top: 12px; padding: 6px 12px; background: #4A90E2;
+                color: white; border: none; border-radius: 4px; cursor: pointer;
+            }
+            #info-panel .fav-btn:hover { background: #357ABD; }
+            #info-panel .fav-btn.faved { background: #27ae60; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    _showInfoPanel(info) {
+        this._ensureInfoPanelStyle();
+        let panel = document.getElementById('info-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'info-panel';
+            document.body.appendChild(panel);
+        }
+        const azStr = info.az.toFixed(2) + '°';
+        const altStr = info.alt.toFixed(2) + '°';
+        let html = `<span class="info-close" onclick="window.celestialScene._hideInfoPanel()">✕</span>`;
+        html += `<h4>${info.name}</h4>`;
+        html += `<div class="info-row"><span class="info-label">类型:</span> ${
+            info.type === 'star' ? '恒星' : info.type === 'sun' ? '太阳' : info.type === 'moon' ? '月球' : '行星'
+        }</div>`;
+        if (info.type === 'star') {
+            if (info.constellation) html += `<div class="info-row"><span class="info-label">星座:</span> ${info.constellation}</div>`;
+            if (info.ra_hours != null) html += `<div class="info-row"><span class="info-label">赤经:</span> ${info.ra_hours.toFixed(3)}h</div>`;
+            if (info.dec != null) html += `<div class="info-row"><span class="info-label">赤纬:</span> ${info.dec.toFixed(2)}°</div>`;
+            if (info.mag != null) html += `<div class="info-row"><span class="info-label">视星等:</span> ${info.mag}</div>`;
+            if (info.spect) html += `<div class="info-row"><span class="info-label">光谱:</span> ${info.spect}</div>`;
+            if (info.dist_ly != null) html += `<div class="info-row"><span class="info-label">距离:</span> ${info.dist_ly} ly</div>`;
+        }
+        html += `<div class="info-row"><span class="info-label">方位角 Az:</span> ${azStr}</div>`;
+        html += `<div class="info-row"><span class="info-label">高度角 Alt:</span> ${altStr}</div>`;
+        if (info.type === 'star' && info.starData && info.name && info.name !== '(unnamed)') {
+            const isFaved = window.isFavorite && window.isFavorite(info.name);
+            html += `<button class="fav-btn ${isFaved ? 'faved' : ''}" data-star='${JSON.stringify(info.starData).replace(/'/g, "&#39;")}'>${isFaved ? '✓ 已收藏' : '☆ 收藏'}</button>`;
+        }
+        panel.innerHTML = html;
+        panel.style.display = 'block';
+        const favBtn = panel.querySelector('.fav-btn');
+        if (favBtn) {
+            favBtn.onclick = () => {
+                const star = JSON.parse(favBtn.dataset.star);
+                if (window.toggleFavorite) window.toggleFavorite(star);
+                const nowFaved = window.isFavorite && window.isFavorite(info.name);
+                favBtn.textContent = nowFaved ? '✓ 已收藏' : '☆ 收藏';
+                favBtn.classList.toggle('faved', nowFaved);
+            };
+        }
+    }
+
+    _hideInfoPanel() {
+        const panel = document.getElementById('info-panel');
+        if (panel) panel.style.display = 'none';
     }
 
     _findNearestStar(point) {
@@ -571,6 +695,7 @@ class CelestialScene3D {
             .then(gj => {
                 window.__constLineSegs = this._parseLineGeoJSON(gj);
                 this.updateConstellationLines();
+                this.updateConstellationNames();   // ★ 新增：连线就绪后连带刷新星座名称
             })
             .catch(() => { /* 均失败 → 保持内置简表回退 */ });
     }
@@ -610,12 +735,11 @@ class CelestialScene3D {
         for (const c of Object.keys(acc)) {
             const a = acc[c];
             if (!a.n) continue;
-            // 单位向量平均后归一化 = 球面几何中心（自动避免赤经 0h 环绕问题）
             let x = a.x / a.n, y = a.y / a.n, z = a.z / a.n;
             const len = Math.sqrt(x*x + y*y + z*z);
             if (len < 1e-6) continue;
             x /= len; y /= len; z /= len;
-            const sp = this.createTextSprite(c, 0x88aaff, 34);   // 星座名再大一号
+            const sp = this.createTextSprite(c, 0x88aaff, 34);
             sp.scale.set(0.28, 0.07, 1);
             sp.userData.baseScale = { x: 0.28, y: 0.07 };
             sp.position.set(x * 0.90, z * 0.90, -y * 0.90);
@@ -694,6 +818,35 @@ class CelestialScene3D {
             fromPhi: this.phi, toPhi: targetPhi
         };
         this._flashHighlight(star);
+    }
+
+    // ===== 公开：显示恒星信息面板（供搜索/收藏调用，与点击完全一致）=====
+    showStarInfo(star) {
+        if (!star) return;
+        const e = new THREE.Vector3(star.x, star.z, -star.y);
+        const h = e.applyMatrix4(this.horizonGroup.matrix);   // 赤道 → 地平
+        const { az, alt } = this._calcAzAlt(h);
+        this._showInfoPanel({
+            type: 'star', name: star.name || '(unnamed)',
+            constellation: star.constellation,
+            ra_hours: star.ra_hours, dec: star.dec,
+            mag: star.mag, spect: star.spect, dist_ly: star.dist_ly,
+            az, alt, starData: star
+        });
+    }
+
+    // 供收藏夹点击时直接显示信息面板
+    _onClickFocusStar(star) {
+        const e = new THREE.Vector3(star.x, star.z, -star.y);
+        const h = e.applyMatrix4(this.horizonGroup.matrix);
+        const { az, alt } = this._calcAzAlt(h);
+        this._showInfoPanel({
+            type: 'star', name: star.name || '(unnamed)',
+            constellation: star.constellation,
+            ra_hours: star.ra_hours, dec: star.dec,
+            mag: star.mag, spect: star.spect, dist_ly: star.dist_ly,
+            az, alt, starData: star
+        });
     }
 
     // ===== 聚焦太阳系天体（按名称取实时位置）=====

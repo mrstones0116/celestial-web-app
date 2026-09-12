@@ -85,6 +85,43 @@ function setupUI() {
     if (nT) nT.onchange = () => { if (scene3d) scene3d.setLinesVisible(nT.checked); };
     if (cT) cT.onchange = () => { if (scene3d) scene3d.setConstNamesVisible(cT.checked); };
 
+    // ===== 地理位置面板 =====
+    const latIn = document.getElementById('loc-lat');
+    const lonIn = document.getElementById('loc-lon');
+    const locPreset = document.getElementById('loc-preset');
+    function applyLoc(lat, lon, label) {
+        if (isNaN(lat) || isNaN(lon)) return;
+        lat = Math.max(-90, Math.min(90, lat));
+        lon = Math.max(-180, Math.min(180, lon));
+        if (window.timeManager) window.timeManager.setLocation(lat, lon);
+        if (latIn) latIn.value = lat.toFixed(2);
+        if (lonIn) lonIn.value = lon.toFixed(2);
+        const locInfo = document.getElementById('loc-info');
+        if (locInfo) locInfo.textContent = (label || '自定义') + ' (' +
+            Math.abs(lat).toFixed(2) + '°' + (lat >= 0 ? 'N' : 'S') + ', ' +
+            Math.abs(lon).toFixed(2) + '°' + (lon >= 0 ? 'E' : 'W') + ')';
+    }
+    const locApply = document.getElementById('loc-apply');
+    if (locApply) locApply.onclick = () => applyLoc(parseFloat(latIn.value), parseFloat(lonIn.value), '自定义');
+    if (locPreset) locPreset.onchange = () => {
+        const v = locPreset.value.split(',').map(Number);
+        applyLoc(v[0], v[1], locPreset.options[locPreset.selectedIndex].text);
+    };
+    const locGps = document.getElementById('loc-gps');
+    if (locGps) locGps.onclick = () => {
+        if (!navigator.geolocation) {
+            const locInfo = document.getElementById('loc-info');
+            if (locInfo) locInfo.textContent = '❌ 此环境不支持 GPS';
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            pos => applyLoc(pos.coords.latitude, pos.coords.longitude, 'GPS 定位'),
+            () => {
+                const locInfo = document.getElementById('loc-info');
+                if (locInfo) locInfo.textContent = '❌ GPS 失败，请手动输入';
+            }
+        );
+    };
     sync();
 }
 
@@ -114,9 +151,12 @@ async function loadData() {
                 scene3d.init();
             }
             await refreshData(6.0);
-
             // 加载 88 星座标准连线（本地优先/在线回退/非阻塞）
             if (scene3d.loadConstellationLines) scene3d.loadConstellationLines();
+            // ★ 修复初次加载星座信息不显示：等首帧矩阵稳定后强制重刷一次
+            setTimeout(() => {
+                if (scene3d && scene3d.refreshConstellationInfo) scene3d.refreshConstellationInfo();
+            }, 150);
         } else {
             if (statusEl) {
                 statusEl.textContent = `❌ ${data.message}`;
@@ -134,6 +174,7 @@ async function loadData() {
 }
 
 /* ===== 刷新数据 ===== */
+/* ===== 刷新数据 ===== */
 async function refreshData(maxMag) {
     try {
         const [starsRes, brightRes, statsRes, constRes, topRes] = await Promise.all([
@@ -149,15 +190,24 @@ async function refreshData(maxMag) {
         const constData  = await constRes.json();
         const topData    = await topRes.json();
 
-        if (scene3d) scene3d.updateStars(starsData.stars, brightData.stars);
-        if (chart2d) chart2d.draw(starsData.stars);
-
+        // ★ 先更新数据面板（不受 3D 渲染异常影响）
         updateStats(statsData);
         updateConstellationTable(constData.constellations);
         updateBrightStarsTable(topData.stars);
-
         const filterInfo = document.getElementById('filter-info');
         if (filterInfo) filterInfo.textContent = `当前显示: ${statsData.current_count} / ${statsData.total_stars} 颗星`;
+
+        // ★ 再更新 3D 渲染（独立 try-catch，避免拖累数据面板）
+        try {
+            if (scene3d) scene3d.updateStars(starsData.stars, brightData.stars);
+        } catch (renderErr) {
+            console.error('3D 渲染失败:', renderErr);
+        }
+        try {
+            if (chart2d) chart2d.draw(starsData.stars);
+        } catch (chartErr) {
+            console.error('2D 图表渲染失败:', chartErr);
+        }
     } catch (err) {
         console.error('刷新数据失败:', err);
     }
