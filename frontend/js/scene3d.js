@@ -21,6 +21,20 @@ const PLANET_DISPLAY = {
   Saturn:{color:0xe3c985,label:'Saturn'},   Uranus:{color:0x8fd1d8,label:'Uranus'},
   Neptune:{color:0x5b7fd4,label:'Neptune'}, Moon:{color:0xdddddd,label:'Moon'}
 };
+// ===== 行星物理参数（截至 2025）=====
+const PLANET_PHYSICS = {
+    Mercury: { diameter: '4,879 km', mass: '0.055 地球', gravity: '3.7 m/s²', day: '58.6 地球日', year: '88 地球日', temp: '-173~427°C', atmo: '极稀薄 (O, Na, H)', moons: 0 },
+    Venus:   { diameter: '12,104 km', mass: '0.815 地球', gravity: '8.87 m/s²', day: '243 地球日(逆行)', year: '224.7 地球日', temp: '462°C', atmo: 'CO₂ 96.5% + N₂', moons: 0 },
+    Mars:    { diameter: '6,779 km', mass: '0.107 地球', gravity: '3.71 m/s²', day: '24.6 小时', year: '687 地球日', temp: '-63°C(均)', atmo: 'CO₂ 95%', moons: 2 },
+    Jupiter: { diameter: '139,820 km', mass: '317.8 地球', gravity: '24.79 m/s²', day: '9.9 小时', year: '11.86 年', temp: '-108°C', atmo: 'H₂ 90% + He', moons: 95 },
+    Saturn:  { diameter: '116,460 km', mass: '95.2 地球', gravity: '10.44 m/s²', day: '10.7 小时', year: '29.45 年', temp: '-139°C', atmo: 'H₂ 96% + He', moons: 274 },
+    Uranus:  { diameter: '50,724 km', mass: '14.5 地球', gravity: '8.87 m/s²', day: '17.2 小时(逆行)', year: '84 年', temp: '-197°C', atmo: 'H₂ + He + CH₄', moons: 28 },
+    Neptune: { diameter: '49,244 km', mass: '17.1 地球', gravity: '11.15 m/s²', day: '16.1 小时', year: '164.8 年', temp: '-201°C', atmo: 'H₂ + He + CH₄', moons: 16 },
+    Moon:    { diameter: '3,474 km', mass: '0.0123 地球', gravity: '1.62 m/s²', day: '29.5 地球日', year: '27.3 地球日(公转)', temp: '-173~127°C', atmo: '极稀薄', moons: 0 },
+    Sun:     { diameter: '1,392,700 km', mass: '333,000 地球', gravity: '274 m/s²', day: '25~35 日(较差)', year: '2.3 亿年(绕银心)', temp: '表面 5,500°C', atmo: 'H 73% + He 25%', moons: '行星 8 颗' }
+};
+// ===== 行星星等模型：V = H + 5log10(r·Δ) + 相位项 =====
+const PLANET_MAG_H = { Mercury: -0.42, Venus: -4.40, Mars: -1.52, Jupiter: -9.40, Saturn: -8.88, Uranus: -7.19, Neptune: -6.87 };
 
 class CelestialScene3D {
     constructor(containerId) {
@@ -57,6 +71,11 @@ class CelestialScene3D {
         this.labelPool = [];        // { sprite, mag } 星名标签池
         this._magLimit = 2.5;       // 当前显示名字的最暗星等
         this._labelTexCache = {};   // 文字纹理缓存（避免重建 canvas）
+        this._planetInfo = {};      // 每帧实时：距离/相位/星等
+        this._dsoRaw = null; this.dsoData = []; this.dsoPoints = null; this.dsoLabels = null;
+        this._dsoVisible = true;
+        this.dashedRingTexture = null;
+        this.dsoRings = [];
         this._constNamesVisible = true;
         this.SPECTRAL_COLORS = {
             'O': 0x9bb0ff, 'B': 0xaabfff, 'A': 0xcad7ff, 'F': 0xf8f7ff,
@@ -75,6 +94,24 @@ class CelestialScene3D {
         g.addColorStop(0.7, 'rgba(255,255,255,0.3)');
         g.addColorStop(1, 'rgba(255,255,255,0.0)');
         ctx.fillStyle = g; ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    _createDashedRingTexture() {
+        const size = 128;
+        const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const c = size / 2;
+        const r = size / 2 - 10;
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 4;
+        ctx.setLineDash([10, 7]);
+        ctx.beginPath();
+        ctx.arc(c, c, r, 0, Math.PI * 2);
+        ctx.stroke();
         const tex = new THREE.CanvasTexture(canvas);
         tex.needsUpdate = true;
         return tex;
@@ -155,6 +192,7 @@ class CelestialScene3D {
                 Math.min(this.fovMax, this.camera.fov + dir * this.fovStep));
             this.camera.updateProjectionMatrix();
             this._updateStarSizes();
+            this._refreshDSOEpoch();
             this._applyLabelLOD();
             const ind = document.getElementById('fov-indicator');
             if (ind) { ind.textContent = `FOV: ${this.camera.fov.toFixed(0)}°`; ind.style.display = 'block'; }
@@ -252,14 +290,13 @@ class CelestialScene3D {
         }
     }
 
-    // ===== 点击检测：恒星 + 太阳系天体，显示详细信息 =====
     _onClickRaycast(event) {
         const rect = this.container.getBoundingClientRect();
         this.mouse.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
         this.raycaster.setFromCamera(this.mouse, this.camera);
         this.raycaster.params.Points.threshold = 0.02;
-
+        
         // 1. 检测恒星
         let hitStar = null, hitStarDist = Infinity;
         for (const layer of this.starLayers) {
@@ -270,8 +307,18 @@ class CelestialScene3D {
                 hitStar = this._findNearestStar(layer.worldToLocal(hits[0].point.clone()));
             }
         }
-
-        // 2. 检测太阳系天体（角度匹配）
+        
+        // 2. 检测深空天体
+        let hitDSO = null, hitDSODist = Infinity;
+        if (this._dsoVisible && this.dsoRings && this.dsoRings.length) {
+            const dh = this.raycaster.intersectObjects(this.dsoRings);
+            if (dh.length > 0) {
+                hitDSODist = dh[0].distance;
+                hitDSO = dh[0].object.userData.dso || null;
+            }
+        }
+        
+        // 3. 检测太阳系天体（角度匹配）
         let hitBody = null, hitBodyAngle = Infinity;
         const checkBody = (obj, type, name) => {
             if (!obj || !obj.visible) return;
@@ -290,18 +337,16 @@ class CelestialScene3D {
                 checkBody(this.solarBodies[key].dot, 'planet', PLANET_DISPLAY[key].label);
             }
         }
-
-        // 3. 优先显示太阳系天体（更近），否则恒星
+        
+        // 4. 优先级：太阳系天体 > 深空天体 > 恒星
         if (hitBody) {
-            const { az, alt } = this._calcAzAlt(hitBody.worldPos);
-            this._showInfoPanel({
-                type: hitBody.type, name: hitBody.name,
-                az, alt
-            });
+            this.showSolarInfo(hitBody.name);
+        } else if (hitDSO && (!hitStar || hitDSODist < hitStarDist)) {
+            this.showDSOInfo(hitDSO);
         } else if (hitStar) {
-            this.showStarInfo(hitStar);   // 与搜索走同一方法
-        }else {
-            this._hideInfoPanel(); // 点击空白处关闭面板
+            this.showStarInfo(hitStar);
+        } else {
+            this._hideInfoPanel();
         }
     }
 
@@ -352,34 +397,54 @@ class CelestialScene3D {
             panel.id = 'info-panel';
             document.body.appendChild(panel);
         }
-        const azStr = info.az.toFixed(2) + '°';
-        const altStr = info.alt.toFixed(2) + '°';
+        const azStr  = info.az  != null ? info.az.toFixed(2)  + '°' : '--';
+        const altStr = info.alt != null ? info.alt.toFixed(2) + '°' : '--';
+        const typeLabel = { star:'恒星', sun:'太阳', moon:'月球', planet:'行星', dso:'深空天体' }[info.type] || '天体';
+
         let html = `<span class="info-close" onclick="window.celestialScene._hideInfoPanel()">✕</span>`;
         html += `<h4>${info.name}</h4>`;
-        html += `<div class="info-row"><span class="info-label">类型:</span> ${
-            info.type === 'star' ? '恒星' : info.type === 'sun' ? '太阳' : info.type === 'moon' ? '月球' : '行星'
-        }</div>`;
-        if (info.type === 'star') {
-            if (info.constellation) html += `<div class="info-row"><span class="info-label">星座:</span> ${info.constellation}</div>`;
-            if (info.ra_hours != null) html += `<div class="info-row"><span class="info-label">赤经:</span> ${info.ra_hours.toFixed(3)}h</div>`;
-            if (info.dec != null) html += `<div class="info-row"><span class="info-label">赤纬:</span> ${info.dec.toFixed(2)}°</div>`;
-            if (info.mag != null) html += `<div class="info-row"><span class="info-label">视星等:</span> ${info.mag}</div>`;
-            if (info.spect) html += `<div class="info-row"><span class="info-label">光谱:</span> ${info.spect}</div>`;
-            if (info.dist_ly != null) html += `<div class="info-row"><span class="info-label">距离:</span> ${info.dist_ly} ly</div>`;
+        html += `<div class="info-row"><span class="info-label">类型:</span> ${typeLabel}</div>`;
+
+        // 优先使用预构建 rows（太阳系天体等详细信息）
+        if (info.rows && info.rows.length) {
+            for (const [k, v] of info.rows) {
+                if (v != null && v !== '') html += `<div class="info-row"><span class="info-label">${k}:</span> ${v}</div>`;
+            }
+        } else {
+            // 兼容恒星扁平字段
+            if (info.type === 'star') {
+                if (info.constellation) html += `<div class="info-row"><span class="info-label">星座:</span> ${info.constellation}</div>`;
+                if (info.ra_hours != null) html += `<div class="info-row"><span class="info-label">赤经:</span> ${info.ra_hours.toFixed(3)}h</div>`;
+                if (info.dec != null) html += `<div class="info-row"><span class="info-label">赤纬:</span> ${info.dec.toFixed(2)}°</div>`;
+                if (info.mag != null) html += `<div class="info-row"><span class="info-label">视星等:</span> ${info.mag}</div>`;
+                if (info.spect) html += `<div class="info-row"><span class="info-label">光谱:</span> ${info.spect}</div>`;
+                if (info.dist_ly != null) html += `<div class="info-row"><span class="info-label">距离:</span> ${info.dist_ly} ly</div>`;
+            }
+            // 兼容深空天体扁平字段
+            if (info.type === 'dso') {
+                if (info.dsoType) html += `<div class="info-row"><span class="info-label">类型:</span> ${info.dsoType}</div>`;
+                if (info.mag != null) html += `<div class="info-row"><span class="info-label">视星等:</span> ${info.mag}</div>`;
+                if (info.size) html += `<div class="info-row"><span class="info-label">角直径:</span> ${info.size}′</div>`;
+            }
         }
+
         html += `<div class="info-row"><span class="info-label">方位角 Az:</span> ${azStr}</div>`;
         html += `<div class="info-row"><span class="info-label">高度角 Alt:</span> ${altStr}</div>`;
-        if (info.type === 'star' && info.starData && info.name && info.name !== '(unnamed)') {
+
+        // 收藏按钮（所有天体均可收藏）
+        if (info.name && info.name !== '(unnamed)') {
             const isFaved = window.isFavorite && window.isFavorite(info.name);
-            html += `<button class="fav-btn ${isFaved ? 'faved' : ''}" data-star='${JSON.stringify(info.starData).replace(/'/g, "&#39;")}'>${isFaved ? '✓ 已收藏' : '☆ 收藏'}</button>`;
+            const favItem = info.favData || { name: info.name, type: info.type };
+            html += `<button class="fav-btn ${isFaved ? 'faved' : ''}" data-fav='${JSON.stringify(favItem).replace(/'/g, "&#39;")}'>${isFaved ? '✓ 已收藏' : '☆ 收藏'}</button>`;
         }
+
         panel.innerHTML = html;
         panel.style.display = 'block';
         const favBtn = panel.querySelector('.fav-btn');
         if (favBtn) {
             favBtn.onclick = () => {
-                const star = JSON.parse(favBtn.dataset.star);
-                if (window.toggleFavorite) window.toggleFavorite(star);
+                const item = JSON.parse(favBtn.dataset.fav);
+                if (window.toggleFavorite) window.toggleFavorite(item);
                 const nowFaved = window.isFavorite && window.isFavorite(info.name);
                 favBtn.textContent = nowFaved ? '✓ 已收藏' : '☆ 收藏';
                 favBtn.classList.toggle('faved', nowFaved);
@@ -390,6 +455,21 @@ class CelestialScene3D {
     _hideInfoPanel() {
         const panel = document.getElementById('info-panel');
         if (panel) panel.style.display = 'none';
+    }
+
+    _attachFavButton(panel, favItem) {
+        if (!favItem || !favItem.name || favItem.name === '(unnamed)') return;
+        const isFaved = window.isFavorite && window.isFavorite(favItem.name);
+        const btn = document.createElement('button');
+        btn.className = 'fav-btn' + (isFaved ? ' faved' : '');
+        btn.textContent = isFaved ? '✓ 已收藏' : '☆ 收藏';
+        btn.onclick = () => {
+            if (window.toggleFavorite) window.toggleFavorite(favItem);
+            const nowFaved = window.isFavorite && window.isFavorite(favItem.name);
+            btn.textContent = nowFaved ? '✓ 已收藏' : '☆ 收藏';
+            btn.classList.toggle('faved', nowFaved);
+        };
+        panel.appendChild(btn);
     }
 
     _findNearestStar(point) {
@@ -864,6 +944,163 @@ class CelestialScene3D {
         const fakeStar = { x: pos.x, y: -pos.z, z: pos.y };
         this.focusOnStar(fakeStar);
      }
+
+    // ===== 行星完整实时状态：距离/相位角/照亮率/视星等 =====
+    _planetFullState(key, T) {
+        const hp = this._planetHeliocentric(key, T);
+        const he = this._planetHeliocentric('EMB', T);
+        const g = [hp[0]-he[0], hp[1]-he[1], hp[2]-he[2]];
+        const distAU = Math.hypot(g[0], g[1], g[2]);       // 地心距
+        const rAU = Math.hypot(hp[0], hp[1], hp[2]);       // 日心距
+        const RAU = Math.hypot(he[0], he[1], he[2]);       // 地球日心距
+        const eps = 23.4392911 * Math.PI/180, ce = Math.cos(eps), se = Math.sin(eps);
+        const eq = [g[0], g[1]*ce - g[2]*se, g[1]*se + g[2]*ce];
+        const len = Math.hypot(eq[0], eq[1], eq[2]);
+        const vec = [eq[0]/len, eq[1]/len, eq[2]/len];
+        let cosA = (rAU*rAU + distAU*distAU - RAU*RAU) / (2 * rAU * distAU);
+        cosA = Math.max(-1, Math.min(1, cosA));
+        const alpha = Math.acos(cosA) * 180 / Math.PI;     // 相位角
+        const illum = (1 + cosA) / 2;                       // 照亮比例
+        let mag = null;
+        const H = PLANET_MAG_H[key];
+        if (H != null) {
+            mag = H + 5 * Math.log10(rAU * distAU);
+            const a = alpha;
+            if (key === 'Mercury') mag += 0.038*a - 0.000273*a*a + 0.000002*a*a*a;
+            else if (key === 'Venus') mag += 0.0009*a + 0.000239*a*a - 0.00000065*a*a*a;
+            else if (key === 'Mars') mag += 0.016*a;
+            else if (key === 'Jupiter') mag += 0.005*a;
+            else if (key === 'Saturn') mag += 0.044*a - 0.6;   // 含环平均增益
+            else if (key === 'Uranus') mag += 0.002*a;
+            mag = +mag.toFixed(2);
+        }
+        return { vec, distAU, rAU, alpha, illum, mag };
+    }
+
+    // ===== 太阳系天体详细信息面板（实时星等/相位/距离 + 物理参数 + 卫星数）=====
+    showSolarInfo(name) {
+        let obj = null;
+        if (name === 'Sun') obj = this.sunGroup;
+        else if (name === 'Moon') obj = this.moonGroup;
+        else if (this.solarBodies && this.solarBodies[name]) obj = this.solarBodies[name].dot;
+        if (!obj) return;
+
+        const wp = obj.getWorldPosition(new THREE.Vector3());
+        const { az, alt } = this._calcAzAlt(wp);
+        const info = this._planetInfo[name] || {};
+        const phys = PLANET_PHYSICS[name] || {};
+
+        const rows = [];
+        if (info.mag != null) rows.push(['实时视星等', info.mag]);
+        if (info.distAU != null) rows.push(['实时距离', info.distAU.toFixed(4) + ' AU（' + (info.distAU * 149.6).toFixed(1) + ' 百万km）']);
+        if (info.distKm != null) rows.push(['实时距离', Math.round(info.distKm).toLocaleString() + ' km']);
+        if (name !== 'Sun' && info.alpha != null) rows.push(['相位角', info.alpha.toFixed(1) + '°']);
+        if (name !== 'Sun' && info.illum != null) rows.push(['照亮比例', (info.illum * 100).toFixed(1) + '%']);
+        if (info.rAU != null) rows.push(['日心距', info.rAU.toFixed(3) + ' AU']);
+        if (phys.diameter) rows.push(['直径', phys.diameter]);
+        if (phys.mass)     rows.push(['质量', phys.mass]);
+        if (phys.gravity)  rows.push(['表面重力', phys.gravity]);
+        if (phys.day)      rows.push(['自转周期', phys.day]);
+        if (phys.year)     rows.push(['公转周期', phys.year]);
+        if (phys.temp)     rows.push(['温度', phys.temp]);
+        if (phys.atmo)     rows.push(['大气', phys.atmo]);
+        if (phys.moons != null) rows.push(['卫星数量', phys.moons]);
+
+        const solType = name === 'Sun' ? 'sun' : name === 'Moon' ? 'moon' : 'planet';
+        this._showInfoPanel({
+            name, type: solType, rows, az, alt,
+            favData: { name, type: solType, mag: info.mag != null ? info.mag : null }
+        });
+    }
+    _renderPanel(title, rows, favItem) {
+        this._ensureInfoPanelStyle();
+        let panel = document.getElementById('info-panel');
+        if (!panel) { panel = document.createElement('div'); panel.id = 'info-panel'; document.body.appendChild(panel); }
+        panel.innerHTML = `<span class="info-close" onclick="window.celestialScene._hideInfoPanel()">✕</span><h4>${title}</h4>` +
+            rows.map(([k, v]) => `<div class="info-row"><span class="info-label">${k}:</span> ${v}</div>`).join('');
+        panel.style.display = 'block';
+        if (favItem) this._attachFavButton(panel, favItem);
+    }
+
+    // ===== 深空天体 =====
+    addDSOs(list) { this._dsoRaw = list; this._buildDSOs(); }
+    _buildDSOs() {
+        if (this.dsoPoints) { this.skyGroup.remove(this.dsoPoints); this.dsoPoints.geometry.dispose(); this.dsoPoints.material.dispose(); this.dsoPoints = null; }
+        if (this.dsoLabels) { this.dsoLabels.forEach(l => this.skyGroup.remove(l)); this.dsoLabels = []; }
+        if (this.dsoRings)  { this.dsoRings.forEach(r => this.skyGroup.remove(r)); this.dsoRings = []; }
+        if (!this._dsoRaw || !this._dsoRaw.length) return;
+        const P = (window.timeManager && window.timeManager.precessionMatrix)
+            ? window.timeManager.precessionMatrix(window.timeManager.getEpochYear()) : null;
+        const data = this._dsoRaw.map(d0 => {
+            let x = d0.x, y = d0.y, z = d0.z;
+            if (P) {
+                const nx = P[0]*x + P[1]*y + P[2]*z, ny = P[3]*x + P[4]*y + P[5]*z, nz = P[6]*x + P[7]*y + P[8]*z;
+                x = nx; y = ny; z = nz;
+            }
+            return Object.assign({}, d0, { x, y, z });
+        });
+        // ★ 全部导入（含非梅西耶，供搜索/收藏/付费版），但只渲染梅西耶
+        this.dsoData = data;
+        if (!this.dashedRingTexture) this.dashedRingTexture = this._createDashedRingTexture();
+        const messier = data.filter(d => d.isMessier);
+        this.dsoRings = [];
+        messier.forEach(d => {
+            const ring = new THREE.Sprite(new THREE.SpriteMaterial({
+                map: this.dashedRingTexture, color: 0xbbbbcc,
+                transparent: true, opacity: 0.75, depthWrite: false
+            }));
+            let size = 0.05;
+            if (d.dim) {
+                const arcmin = parseFloat(d.dim.split('x')[0]);
+                if (!isNaN(arcmin) && arcmin > 0) {
+                    const rad = arcmin / 60 * Math.PI / 180;
+                    size = Math.max(0.035, Math.min(0.22, rad * 2.5));
+                }
+            }
+            ring.scale.set(size, size, 1);
+            ring.position.set(d.x * 1.01, d.z * 1.01, -d.y * 1.01);
+            ring.userData.dso = d;
+            ring.visible = this._dsoVisible;
+            this.skyGroup.add(ring);
+            this.dsoRings.push(ring);
+        });
+        this.dsoLabels = [];
+        messier.forEach(d => {
+            const sp = this.createTextSprite(d.name, 0x99aaff, 24);
+            sp.scale.set(0.14, 0.035, 1);
+            sp.userData.baseScale = { x: 0.14, y: 0.035 };
+            sp.center.set(0.5, 1.0);
+            sp.position.set(d.x * 1.02, d.z * 1.02, -d.y * 1.02);
+            sp.visible = this._dsoVisible;
+            this.skyGroup.add(sp);
+            this.dsoLabels.push(sp);
+        });
+    }
+    setDSOVisible(v) {
+        this._dsoVisible = v;
+        if (this.dsoRings)  this.dsoRings.forEach(r => r.visible = v);
+        if (this.dsoLabels) this.dsoLabels.forEach(l => l.visible = v);
+    }
+    _refreshDSOEpoch() { if (this._dsoRaw && this._dsoRaw.length) this._buildDSOs(); }
+    _findNearestDSO(point) {
+        let best = null, bd = Infinity;
+        for (const d of (this.dsoData || [])) {
+            const dx = d.x - point.x, dy = d.z - point.y, dz = -d.y - point.z;
+            const dist = dx*dx + dy*dy + dz*dz;
+            if (dist < bd) { bd = dist; best = d; }
+        }
+        return bd < 0.001 ? best : null;
+    }
+    showDSOInfo(d) {
+        const e = new THREE.Vector3(d.x, d.z, -d.y);
+        const h = e.applyMatrix4(this.horizonGroup.matrix);
+        const { az, alt } = this._calcAzAlt(h);
+        const t = (window.DSO_TYPES || {})[d.type] || { label: '深空天体' };
+        this._showInfoPanel({
+            type: 'dso', name: d.name, dsoType: t.label,
+            mag: d.mag < 90 ? d.mag : null, size: d.dim, az, alt
+        });
+    }
      
     _flashHighlight(star) {
         const mat = new THREE.SpriteMaterial({
@@ -1116,6 +1353,8 @@ class CelestialScene3D {
             if (this.sunLayers.outer) { this.sunLayers.outer.material.opacity = 0.25 * k; this.sunLayers.outer.visible = k > 0.01; }
             if (this.sunLayers.inner) { this.sunLayers.inner.material.opacity = 0.50 * k; this.sunLayers.inner.visible = k > 0.01; }
         }
+        const he = this._planetHeliocentric('EMB', d / 36525);
+        this._planetInfo['Sun'] = { distAU: Math.hypot(he[0], he[1], he[2]), mag: -26.74, illum: 1, alpha: 0 };
         if (this.solSprite) this.solSprite.position.set(x, z, -y);
     }
 
@@ -1222,7 +1461,7 @@ class CelestialScene3D {
             if (key === 'Sol') continue;
             const eq = (key === 'Moon')
                 ? this._moonEquatorialOfDate(d)
-                : applyP(this._planetGeocentricEquJ2000(key, T));
+                : (() => { const st = this._planetFullState(key, T); this._planetInfo[key] = st; return applyP(st.vec); })();
 
             // 该天体自身的地平高度
             const ra  = Math.atan2(eq[1], eq[0]);
@@ -1244,6 +1483,13 @@ class CelestialScene3D {
                     this._drawMoonPhase(phase);
                     this._lastMoonPhase = phase;
                 }
+                const moonAlpha = Math.abs(180 - 360 * phase);
+                this._planetInfo['Moon'] = {
+                    distKm: 385001 - 20905 * Math.cos((134.963 + 13.064993 * d) * Math.PI / 180),
+                    alpha: moonAlpha,
+                    illum: (1 + Math.cos(moonAlpha * Math.PI / 180)) / 2,
+                    mag: +(-12.74 + 0.026 * moonAlpha).toFixed(2)
+                };
                 if (this.moonLayers) {
                     const L = this.moonLayers;
                     if (L.core)  { L.core.visible  = kAbove > 0.01; L.core.material.opacity  = 1.0 * kAbove; }

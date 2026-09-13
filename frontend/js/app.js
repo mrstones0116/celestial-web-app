@@ -79,6 +79,8 @@ function setupUI() {
     const nT = document.getElementById('toggle-lines');
     const cT = document.getElementById('toggle-const-names');
     const grT = document.getElementById('toggle-grid');
+    const dsoT = document.getElementById('toggle-dso');
+    if (dsoT) dsoT.onchange = () => { if (scene3d) scene3d.setDSOVisible(dsoT.checked); };
     if (grT) grT.onchange = () => { if (window.celestialScene) window.celestialScene.setGridVisible(grT.checked); };
     if (gT) gT.onchange = () => { if (scene3d) scene3d.setGroundVisible(gT.checked); };
     if (lT) lT.onchange = () => { if (scene3d) scene3d.setLabelsVisible(lT.checked); };

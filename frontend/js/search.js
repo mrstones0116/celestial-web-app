@@ -33,13 +33,21 @@
     function getFavorites() {
         try { return JSON.parse(localStorage.getItem('favorites') || '[]'); } catch { return []; }
     }
+    function typeLabel(type) {
+        const map = { sun: '太阳', moon: '月球', planet: '行星', dso: '深空天体', star: '恒星' };
+        return map[type] || '';
+    }
     window.isFavorite = (name) => getFavorites().some(f => f.name === name);
-    window.toggleFavorite = (star) => {
+    window.toggleFavorite = (item) => {
         let favs = getFavorites();
-        if (favs.some(f => f.name === star.name)) {
-            favs = favs.filter(f => f.name !== star.name);
+        if (favs.some(f => f.name === item.name)) {
+            favs = favs.filter(f => f.name !== item.name);
         } else {
-            favs.push({ name: star.name, constellation: star.constellation || '', mag: star.mag });
+            favs.push({
+                name: item.name, type: item.type || 'star',
+                constellation: item.constellation || '',
+                mag: item.mag != null ? item.mag : null
+            });
         }
         localStorage.setItem('favorites', JSON.stringify(favs));
         renderFavorites();
@@ -53,12 +61,12 @@
             container.innerHTML = '<div class="fav-empty">暂无收藏</div>';
             return;
         }
-        container.innerHTML = favs.map(f => `
-            <div class="fav-item" data-name="${f.name}">
-                <span class="fav-name">${f.name}</span>
-                <span class="fav-meta">${f.constellation || ''}</span>
-                <button class="fav-remove" title="移除">✕</button>
-            </div>`).join('');
+        container.innerHTML = favs.map(f =>
+            `<div class="fav-item" data-name="${f.name}" data-type="${f.type || 'star'}">` +
+            `<span class="fav-name">${f.name}</span> ` +
+            `<span class="fav-meta">${f.constellation || typeLabel(f.type)}</span> ` +
+            `<button class="fav-remove" title="移除">✕</button> </div>`
+        ).join('');
         container.querySelectorAll('.fav-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 if (e.target.classList.contains('fav-remove')) {
@@ -67,10 +75,17 @@
                 }
                 const scene = window.celestialScene;
                 if (!scene) return;
-                const star = scene.starData && scene.starData.find(s => s.name === item.dataset.name);
-                if (star) {
-                    scene.focusOnStar(star);
-                    scene._onClickFocusStar(star); // 触发信息面板
+                const name = item.dataset.name;
+                const type = item.dataset.type || 'star';
+                if (type === 'sun' || type === 'moon' || type === 'planet') {
+                    scene.focusOnSolarBody(name);
+                    if (scene.showSolarInfo) scene.showSolarInfo(name);
+                } else if (type === 'dso') {
+                    const dso = scene.dsoData && scene.dsoData.find(d => d.name === name);
+                    if (dso) { scene.focusOnStar(dso); if (scene.showDSOInfo) scene.showDSOInfo(dso); }
+                } else {
+                    const star = scene.starData && scene.starData.find(s => s.name === name);
+                    if (star) { scene.focusOnStar(star); if (scene._onClickFocusStar) scene._onClickFocusStar(star); }
                 }
             });
         });
@@ -85,7 +100,11 @@
         const solar = SOLAR_SYSTEM_BODIES.map(b => ({
             name: b.name, isSolar: true, mag: b.mag, constellation: 'Solar System'
         }));
-        return stars.concat(solar);
+        const dsos = (scene && scene.dsoData) ? scene.dsoData.filter(d => d.name && d.mag <= 9).map(d => ({
+            name: d.name, isDSO: true, mag: d.mag,
+            constellation: ((window.DSO_TYPES || {})[d.type] || { label: '深空天体' }).label
+        })) : [];
+        return stars.concat(solar).concat(dsos);
     }
 
     function renderSuggestions(q) {
@@ -144,6 +163,16 @@
         } else {
             scene.focusOnStar(star);
             if (scene.showStarInfo) scene.showStarInfo(star);   // ← 弹出与点击一致的介绍栏
+        }
+        if (star.isDSO) {
+            const dso = scene.dsoData && scene.dsoData.find(d => d.name === star.name);
+            if (dso) { scene.focusOnStar(dso); if (scene.showDSOInfo) scene.showDSOInfo(dso); }
+            return;
+        }
+        if (star.isSolar && scene.focusOnSolarBody) {
+            scene.focusOnSolarBody(star.name);
+            if (scene.showSolarInfo) scene.showSolarInfo(star.name);
+            return;
         }
     }
 
