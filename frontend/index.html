@@ -18,20 +18,21 @@
     }, true);
     </script>
     <link rel="stylesheet" href="css/style.css">
-    <!-- Three.js：CDN 优先，离线时回退本地 js/three.min.js -->
+
+    <!-- Three.js：CDN 优先，离线时回退本地 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>if (typeof THREE === 'undefined') document.write('<script src="js/three.min.js"><\/script>');</script>
 </head>
 <body>
 
-<!-- ===== 底层：全屏 3D 星空（永远铺满窗口） ===== -->
+<!-- ===== 底层：全屏 3D 星空 ===== -->
 <section class="scene-wrap">
     <div id="placeholder-3d" class="placeholder">🔭 点击左上角 ☰ 打开菜单，加载 HYG 星表数据后开始探索</div>
     <div id="canvas-container" class="scene-container"></div>
     <div id="fov-indicator" class="fov-indicator"></div>
 </section>
 
-<!-- ===== 悬浮 HUD 按钮（z-index 最高，永远可点） ===== -->
+<!-- ===== 悬浮 HUD 按钮 ===== -->
 <button id="toggle-left"       class="hud-btn" title="打开/收起 控制菜单">☰</button>
 <button id="toggle-fullscreen" class="hud-btn" title="全屏 / 窗口模式">⛶</button>
 <button id="toggle-right"      class="hud-btn" title="打开/收起 数据面板">📊</button>
@@ -72,12 +73,28 @@
 
     <!-- 恒星搜索 -->
     <div class="panel search-panel">
-        <h3>🔍 恒星搜索</h3>
+        <h3>🔍 搜索</h3>
         <div class="search-row">
             <input type="text" id="star-search" placeholder="Search star (e.g. Sirius)" autocomplete="off">
             <button id="search-btn">Search</button>
         </div>
         <div id="search-suggestions" class="search-suggestions"></div>
+    </div>
+
+    <!-- ★★★ 照片识星（AI）面板 ★★★ -->
+    <div class="panel">
+        <h3>📷 照片识星（AI）</h3>
+        <input type="file" id="photo-upload" accept="image/*" style="display:none">
+        <button id="btn-photo-identify" class="primary-btn">📷 用 AI 识别夜空照片</button>
+        <div id="photo-status" class="status-text" style="margin-top:8px;"></div>
+
+        <!-- 本地预览缩略图 -->
+        <div id="photo-preview-wrap" style="display:none; margin-top:8px; text-align:center;">
+            <img id="photo-preview" alt="照片预览" style="max-width:100%; max-height:180px; border-radius:6px; border:1px solid rgba(255,255,255,0.15);">
+        </div>
+
+        <!-- 识别结果（由 vision.js 渲染） -->
+        <div id="photo-results" style="margin-top:8px;max-height:320px;overflow-y:auto;"></div>
     </div>
 
     <!-- 收藏夹 -->
@@ -88,7 +105,7 @@
         </div>
     </div>
 
-    <!-- 观测时间（仿 Stellarium）-->
+    <!-- 观测时间 -->
     <div class="panel time-panel">
         <h3>🕐 观测时间（HKT）</h3>
         <div class="time-editor">
@@ -143,7 +160,7 @@
         <div id="epoch-display" class="lst-display">历元: --</div>
     </div>
 
-     <!-- 观测位置 -->
+    <!-- 观测位置 -->
     <div class="panel">
         <h3>📍 观测位置</h3>
         <div class="loc-row">
@@ -175,7 +192,6 @@
 <aside id="right-drawer" class="drawer right">
     <div class="drawer-title">📊 数据面板</div>
 
-    <!-- 统计信息 -->
     <div class="panel" id="stats-panel" style="display:none">
         <h3>📊 统计信息</h3>
         <div class="stats-grid">
@@ -188,13 +204,11 @@
         </div>
     </div>
 
-    <!-- 2D 图表 -->
     <div class="panel">
         <h3>📈 2D 赤经-赤纬坐标</h3>
         <canvas id="chart-2d" width="420" height="240"></canvas>
     </div>
 
-    <!-- 星座统计 -->
     <div class="panel">
         <h3>🏛 星座统计</h3>
         <div class="table-wrap">
@@ -205,7 +219,6 @@
         </div>
     </div>
 
-    <!-- 最亮恒星 -->
     <div class="panel">
         <h3>⭐ 最亮恒星 TOP15</h3>
         <div class="table-wrap">
@@ -216,7 +229,6 @@
         </div>
     </div>
 
-    <!-- 光谱图例 -->
     <div class="panel">
         <h3>🎨 光谱类型</h3>
         <div id="spectral-legend" class="spectral-legend"></div>
@@ -229,12 +241,16 @@
 </div>
 <div id="tooltip" class="tooltip"></div>
 
-<!-- ⚠️ 脚本顺序不可调换：scene3d → chart2d → app → time → search -->
+<!-- ⚠️ 脚本顺序不可调换 -->
 <script src="js/scene3d.js"></script>
 <script src="js/chart2d.js"></script>
 <script src="js/app.js"></script>
 <script src="js/time.js"></script>
 <script src="js/search.js"></script>
 <script src="js/dso.js"></script>
+
+<!-- ★★★ 照片识星交互逻辑（由 vision.js 全权接管，已移除旧版内联脚本防止重复调用） ★★★ -->
+<script src="vision.js"></script>
+
 </body>
 </html>

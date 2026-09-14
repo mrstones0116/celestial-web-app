@@ -1,29 +1,28 @@
-# Python
+# === 敏感文件 ===
+.env
+.env.*
+!.env.example
+
+# === Python ===
 __pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-*.egg
-
-# 虚拟环境
-backend/astro_env/
+*.pyc
+*.pyo
+astro_env/
 venv/
-.env/
+.venv/
 
-# IDE
+# === 构建产物 (PyInstaller) ===
+build/
+dist/
+*.spec
+
+# === 调试与临时文件 ===
+backend/debug/
+$null
+*.log
+
+# === IDE / OS ===
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS
-Thumbs.db
 .DS_Store
-
-# Streamlit
-.streamlit/secrets.toml
-
-# 数据缓存
-*.csv
-*.parquet
+Thumbs.db

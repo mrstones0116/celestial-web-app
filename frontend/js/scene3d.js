@@ -1515,6 +1515,24 @@ class CelestialScene3D {
             body.label.material.opacity = 1.0;
         }
     }
+
+    // ===== 照片识星：高亮匹配恒星 + 聚焦星座 =====
+    highlightIdentified(matchedStars) {
+        if (!matchedStars || !matchedStars.length) return;
+        let focused = false;
+        for (const ms of matchedStars) {
+            const star = this.starData.find(s =>
+                s.name && ms.name && s.name.toLowerCase().includes(ms.name.toLowerCase())
+            );
+            if (star) {
+                this._flashHighlight(star);
+                if (!focused) {
+                    this.focusOnStar(star, 1000);
+                    focused = true;
+                }
+            }
+        }
+    }
     destroy() {
         if (this.animationId) cancelAnimationFrame(this.animationId);
         if (this.renderer) this.renderer.dispose();

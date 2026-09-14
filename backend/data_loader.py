@@ -143,20 +143,32 @@ class HYGDataLoader:
         return stars
 
     def get_bright_stars(self, max_mag: float = 2.5) -> list:
-        """获取亮星标注数据"""
+        """获取亮星数据（含 RA/Dec/星座，识别器需要完整字段）"""
         if not self.loaded or self.df is None:
             return []
 
-        bright = self.df[self.df['mag'] <= max_mag].copy()
+        # 排除太阳（absmag 异常 / 距离接近 0），且必须有星座
+        bright = self.df[
+            (self.df['mag'] <= max_mag) &
+            (self.df['constellation'] != '未知') &
+            (self.df['name'] != 'Sol')
+        ].copy()
         result = []
         for _, row in bright.iterrows():
             name = row['name'] if row['name'] != '未知' else f"Star_{row.name}"
             result.append({
                 'name': name,
+                'constellation': row['constellation'],
+                'ra_hours': float(row['ra_hours']),
+                'dec': float(row['dec']),
+                'mag': float(row['mag']),
+                'absmag': float(row['absmag']) if pd.notna(row['absmag']) else None,
+                'spect': row['spect'],
+                'spect_class': row['spect_class'],
+                'dist_ly': float(row['dist_ly']),
                 'x': float(row['x']),
                 'y': float(row['y']),
                 'z': float(row['z']),
-                'mag': float(row['mag']),
             })
         return result
 
