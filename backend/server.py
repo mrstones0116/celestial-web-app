@@ -9,27 +9,34 @@
 
 import os
 import sys
-import json
-import base64
-import httpx
-import re
-from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List
 
+# ---- 1) 先算目录，再把 .env 提前加载 ----
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+try:
+    from dotenv import load_dotenv
+    _env_path = _BACKEND_DIR / ".env"
+    _loaded = load_dotenv(_env_path)
+    print(f"✅ .env: {_env_path} （{'已加载' if _loaded else '文件不存在，跳过'}）")
+except Exception as _e:
+    print(f"⚠️  .env 加载失败: {_e}")
+
+# ---- 2) .env 加载完成后，再 import 其他模块 ----
+import json
+import base64
+import re
+from io import BytesIO
+from typing import Any, Dict, List
+
+import httpx
+
 from fastapi import FastAPI, Query, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv(_BACKEND_DIR / ".env")
-except Exception:
-    pass
+from tour.api import router as tour_router   # ← 放到最后
 
 from PIL import Image
 import numpy as np
@@ -45,6 +52,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(tour_router, prefix="/api/tour", tags=["tour"])
 
 loader = HYGDataLoader()
 
@@ -217,8 +226,6 @@ async def get_status():
 @app.post("/api/load")
 async def load_data():
     r = loader.load_data()
-    if not r["success"]:
-        raise HTTPException(500, r["message"])
     return r
 
 
@@ -283,9 +290,6 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def _norm(name: str) -> str:
-    """
-    将模型返回的星座名归一化为 IAU 缩写。
-    """
     if not name:
         return ""
 
@@ -376,12 +380,6 @@ def _clean_position(value: Any) -> str:
 
 
 def _clean_bbox(value: Any) -> List[float]:
-    """
-    清洗模型返回的 bbox。
-    支持：
-    · 0~1
-    · 0~1000
-    """
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         return []
 
@@ -450,10 +448,6 @@ def _star_mag(star: Dict[str, Any]) -> float:
 
 
 def _star_display_name(star: Dict[str, Any]) -> str:
-    """
-    返回适合展示的恒星名。
-    过滤数字编号、HD / HIP / HR 等。
-    """
     keys = ("proper", "name", "desig", "bayer", "bf")
 
     for key in keys:
@@ -485,9 +479,6 @@ def _star_display_name(star: Dict[str, Any]) -> str:
 
 
 def _clean_star_for_output(star: Dict[str, Any], display_name: str) -> Dict[str, Any]:
-    """
-    只输出必要字段，避免大量数字编号字段。
-    """
     out: Dict[str, Any] = {
         "name": display_name,
         "display_name": display_name,
@@ -509,12 +500,6 @@ def _select_skeleton_stars(
     stars: List[Dict[str, Any]],
     limit: int = 8,
 ) -> List[Dict[str, Any]]:
-    """
-    选择骨架星：
-    · 优先有名字的亮星；
-    · 过滤数字编号；
-    · 如果没有合适名字星，给少量无名亮星占位，但不显示编号。
-    """
     if not stars:
         return []
 
@@ -550,13 +535,6 @@ def _select_skeleton_stars(
 # ==================== 图片准备 ====================
 
 def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, Any]:
-    """
-    返回：
-    · original_b64：缩放后的原图
-    · adapted_b64：暗部增强版
-    · original_pil：原图 PIL 对象
-    · adapted_pil：增强版 PIL 对象
-    """
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
 
@@ -756,10 +734,6 @@ def _annotate_image(
     verified: List[Dict[str, Any]],
     max_annotations: int = 6,
 ) -> str:
-    """
-    在图片上标注识别到的星座。
-    返回 base64 PNG。
-    """
     from PIL import ImageDraw, ImageFont
 
     img = pil_img.convert("RGB").copy()
@@ -880,7 +854,6 @@ def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> 
                 "reason": str(item.get("reason", "")),
                 "bright_stars": _clean_bright_stars(item.get("bright_stars")),
 
-                # 对外只给骨架星
                 "matched_stars": skeleton_stars,
                 "skeleton_stars": skeleton_stars,
 

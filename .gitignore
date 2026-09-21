@@ -1,28 +1,51 @@
-# === 敏感文件 ===
+# ===== 敏感信息 =====
 .env
-.env.*
+*.env
 !.env.example
+backend/.env
+backend/*.env
 
-# === Python ===
+# ===== 大文件 / 数据 =====
+backend/data/
+*.csv
+!*.example.csv
+
+# ===== Python =====
 __pycache__/
-*.pyc
-*.pyo
-astro_env/
-venv/
-.venv/
-
-# === 构建产物 (PyInstaller) ===
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.eggs/
 build/
 dist/
 *.spec
+.pytest_cache/
+.mypy_cache/
 
-# === 调试与临时文件 ===
-backend/debug/
-$null
-*.log
+# ===== 虚拟环境 =====
+astro_env/
+venv/
+env/
+ENV/
+.venv/
 
-# === IDE / OS ===
+# ===== PyWebView / 打包 =====
+dist/
+CelestialApp/
+
+# ===== 编辑器 =====
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# ===== 系统 =====
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ===== 日志 =====
+*.log
+backend/debug/

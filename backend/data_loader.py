@@ -1,17 +1,20 @@
 """
 HYG星表数据加载与处理模块
 """
+from pathlib import Path
+from typing import Optional, Dict, Any
+from io import StringIO
+
 import pandas as pd
 import numpy as np
 import requests
-from io import StringIO
-from typing import Optional, Dict, Any
 
 
 class HYGDataLoader:
     """HYG星表数据加载器"""
 
     HYG_URL = "https://raw.githubusercontent.com/astronexus/HYG-Database/main/hyg/CURRENT/hygdata_v41.csv"
+    LOCAL_CSV = Path(__file__).resolve().parent / "data" / "hygdata_v41.csv"
     PARSEC_TO_LY = 3.26156
 
     SPECTRAL_COLORS = {
@@ -40,15 +43,30 @@ class HYGDataLoader:
         self.loaded: bool = False
 
     def load_data(self) -> Dict[str, Any]:
-        """从GitHub下载并处理HYG星表数据"""
+        """优先读本地 CSV；没有本地文件才从 GitHub 下载。"""
         try:
-            response = requests.get(self.HYG_URL, timeout=60)
-            response.raise_for_status()
-            self.df = pd.read_csv(StringIO(response.text))
+            # ---- 1) 本地优先 ----
+            if self.LOCAL_CSV.exists():
+                print(f"📂 读取本地星表: {self.LOCAL_CSV}")
+                self.df = pd.read_csv(self.LOCAL_CSV, low_memory=False)
+                total_raw = len(self.df)
+            else:
+                # ---- 2) 本地没有，尝试下载并缓存 ----
+                print(f"⬇️  本地无星表，尝试下载: {self.HYG_URL}")
+                response = requests.get(self.HYG_URL, timeout=120, stream=True)
+                response.raise_for_status()
 
-            total_raw = len(self.df)
+                self.LOCAL_CSV.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.LOCAL_CSV, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
 
-            # 筛选：有光谱类型，星等 < 6（肉眼可见）
+                print(f"✅ 已缓存到: {self.LOCAL_CSV}")
+                self.df = pd.read_csv(self.LOCAL_CSV, low_memory=False)
+                total_raw = len(self.df)
+
+            # ---- 3) 清洗 ----
             mask = (
                 (self.df['mag'].notna()) &
                 (self.df['mag'] < 6) &
@@ -56,7 +74,6 @@ class HYGDataLoader:
             )
             self.df = self.df[mask].copy()
 
-            # 确保必要列
             required_columns = ['ra', 'dec', 'mag', 'proper', 'spect', 'dist', 'absmag']
             for col in required_columns:
                 if col not in self.df.columns:
@@ -65,35 +82,28 @@ class HYGDataLoader:
                     else:
                         self.df[col] = 0
 
-            # 星星名称
             self.df['name'] = self.df['proper'].fillna(self.df['bf'].fillna("未知"))
 
-            # 星座
             if 'con' in self.df.columns:
                 self.df['constellation'] = self.df['con'].fillna("未知")
             else:
                 self.df['constellation'] = "未知"
 
-            # 光谱类型
             self.df['spect'] = self.df['spect'].fillna("G2V").astype(str).str.strip()
 
-            # 坐标转换
             self.df['ra_hours'] = self.df['ra']
             self.df['ra_deg'] = self.df['ra'] * 15
             self.df['ra_rad'] = np.deg2rad(self.df['ra_deg'])
             self.df['dec_rad'] = np.deg2rad(self.df['dec'])
 
-            # 球面 → 笛卡尔
             self.df['x'] = np.cos(self.df['dec_rad']) * np.cos(self.df['ra_rad'])
             self.df['y'] = np.cos(self.df['dec_rad']) * np.sin(self.df['ra_rad'])
             self.df['z'] = np.sin(self.df['dec_rad'])
 
-            # 距离转换
             self.df['dist_parsec'] = pd.to_numeric(self.df['dist'], errors='coerce').fillna(100)
             self.df.loc[self.df['dist_parsec'] <= 0, 'dist_parsec'] = 100
             self.df['dist_ly'] = self.df['dist_parsec'] * self.PARSEC_TO_LY
 
-            # 光谱分类
             self.df['spect_class'] = self.df['spect'].apply(self._get_spectral_class)
 
             self.loaded = True
@@ -105,6 +115,10 @@ class HYGDataLoader:
                 'raw_records': total_raw
             }
 
+        except requests.exceptions.Timeout:
+            return {'success': False, 'message': '下载超时。请手动下载 hygdata_v41.csv 放到 backend/data/'}
+        except requests.exceptions.ConnectionError:
+            return {'success': False, 'message': '无法连接 GitHub。请手动下载 hygdata_v41.csv 放到 backend/data/'}
         except Exception as e:
             return {'success': False, 'message': f'加载失败: {str(e)}'}
 
@@ -147,7 +161,6 @@ class HYGDataLoader:
         if not self.loaded or self.df is None:
             return []
 
-        # 排除太阳（absmag 异常 / 距离接近 0），且必须有星座
         bright = self.df[
             (self.df['mag'] <= max_mag) &
             (self.df['constellation'] != '未知') &

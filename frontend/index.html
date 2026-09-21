@@ -97,6 +97,31 @@
         <div id="photo-results" style="margin-top:8px;max-height:320px;overflow-y:auto;"></div>
     </div>
 
+    <!-- ★★★ 星空导览（AI Tour）面板 ★★★ -->
+    <div class="panel">
+        <h3>🎬 星空导览</h3>
+        <div class="search-row">
+            <input type="text" id="tour-input"
+                   placeholder="例如：我想看夏季星空 / 冬季星空"
+                   autocomplete="off">
+            <button id="tour-start">开始</button>
+        </div>
+        <div id="tour-status" class="status-text"></div>
+
+        <div id="tour-panel" style="display:none; margin-top:10px;">
+            <div id="tour-title"
+                 style="font-weight:bold; margin-bottom:6px; color:#8cd6ff;"></div>
+            <div id="tour-narration"
+                 style="font-size:12px; line-height:1.6; margin-bottom:10px; opacity:0.9;"></div>
+            <div class="time-controls">
+                <button id="tour-prev">◀ 上一步</button>
+                <button id="tour-pause">⏸ 暂停</button>
+                <button id="tour-next">下一步 ▶</button>
+                <button id="tour-stop">✕ 停止</button>
+            </div>
+        </div>
+    </div>
+    
     <!-- 收藏夹 -->
     <div class="panel">
         <h3>⭐ 收藏夹</h3>
@@ -251,6 +276,6 @@
 
 <!-- ★★★ 照片识星交互逻辑（由 vision.js 全权接管，已移除旧版内联脚本防止重复调用） ★★★ -->
 <script src="vision.js"></script>
-
+<script src="js/tour.js"></script>
 </body>
 </html>
