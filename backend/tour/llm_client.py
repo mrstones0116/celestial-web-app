@@ -180,9 +180,6 @@ def _fallback(text: str, reason: str = "") -> Dict[str, Any]:
         kw["reason"] = reason
     return kw
 
-
-# ==================== 主入口（优化调用策略） ====================
-
 async def parse_instruction(text: str) -> Dict[str, Any]:
     text = (text or "").strip()
     if not text:
@@ -194,17 +191,7 @@ async def parse_instruction(text: str) -> Dict[str, Any]:
             "entities": {},
         }
 
-    # ✅ 优化：先用关键词匹配，命中则不调 LLM（节省额度）
-    from .planner import detect_intent as _kw
-    kw_result = _kw(text)
-    if kw_result["intent"] != "default":
-        kw_result["source"] = "keyword"
-        kw_result["confidence"] = 0.6
-        kw_result["entities"] = {}
-        kw_result["reason"] = "关键词直接命中，跳过 LLM"
-        return kw_result
-
-    # ✅ 关键词未命中，才调用 LLM
+    # ✅ 移除关键词优先逻辑，所有请求都走 LLM
     if not _llm_enabled():
         return _fallback(text, "LLM 已通过 TOUR_LLM_ENABLED=0 关闭")
 
@@ -241,10 +228,9 @@ async def parse_instruction(text: str) -> Dict[str, Any]:
                 if isinstance(p, dict) and p.get("type") == "text"
             )
 
-        # ✅ 新增：检查是否被截断
         finish_reason = data["choices"][0].get("finish_reason", "")
         if finish_reason == "length":
-            print(f"[tour] ⚠️ LLM 响应被截断 (max_tokens={512})")
+            print(f"[tour] ⚠️ LLM 响应被截断 (max_tokens=512)")
 
         parsed = _extract_json(str(raw))
         intent = str(parsed.get("intent", "")).strip().lower()
@@ -264,8 +250,8 @@ async def parse_instruction(text: str) -> Dict[str, Any]:
             "intent": intent,
             "confidence": max(0.0, min(1.0, confidence)),
             "reason": reason,
-            "source": "llm",
-            "entities": entities,
+            "source": "llm",       # ✅ 始终标记为 llm
+            "entities": entities,  # ✅ 始终包含 LLM 提取的实体
         }
 
     except httpx.TimeoutException:
