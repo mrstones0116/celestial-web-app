@@ -4,22 +4,27 @@ from datetime import datetime
 
 
 class GeoLocation(BaseModel):
-    latitude: float = 39.9042
-    longitude: float = 116.4074
+    # ✅ 默认地点改为香港
+    latitude: float = 22.3193
+    longitude: float = 114.1694
     altitude: float = 0.0
-    timezone: str = "Asia/Shanghai"
+    timezone: str = "Asia/Hong_Kong"
 
 
 class ObservingTime(BaseModel):
     date: Optional[str] = None                # "YYYY-MM-DD"
     start_local_time: Optional[str] = None    # "HH:MM"
     duration_minutes: int = 60
+    # ✅ 新增：是否强制使用"当前真实时间"（用于"现在我能看到什么"）
+    use_real_time: bool = False
 
 
 class Equipment(BaseModel):
     type: Literal["naked_eye", "binoculars", "telescope", "camera"] = "naked_eye"
     aperture_mm: Optional[float] = None
     limiting_magnitude: float = 5.5
+    # ✅ 新增：光污染环境（影响城市可见性阈值）
+    sky_quality: Literal["city", "suburb", "dark_site"] = "city"
 
 
 class TourPreferences(BaseModel):
@@ -29,6 +34,8 @@ class TourPreferences(BaseModel):
     include_deep_sky: bool = True
     include_planets: bool = False
     include_moon_notes: bool = False
+    # ✅ 新增：是否要求实时可见性过滤
+    require_visible_now: bool = True
 
 
 class CreateTourSessionRequest(BaseModel):
@@ -42,6 +49,8 @@ class CreateTourSessionRequest(BaseModel):
 class InstructionRequest(BaseModel):
     text: str
     client_event_id: Optional[str] = None
+    # ✅ 新增：允许前端携带当前设备时间，解决时区/时间不同步问题
+    client_timestamp: Optional[str] = None
 
 
 class CameraTarget(BaseModel):
@@ -56,7 +65,7 @@ class CameraTarget(BaseModel):
 class TourTarget(BaseModel):
     type: Literal["star", "constellation", "messier", "ngc", "planet", "moon", "asterism"]
     id: str
-    hyg_id: Optional[str] = None          # ← 新增：与 data_loader / vision 对齐
+    hyg_id: Optional[str] = None
     name_zh: str
     name_en: str
     constellation: Optional[str] = None
@@ -66,6 +75,10 @@ class TourTarget(BaseModel):
     altitude_deg: Optional[float] = None
     azimuth_deg: Optional[float] = None
     description: Optional[str] = None
+    # ✅ 新增：实时可见性状态，前端可据此显示"当前不可见"
+    is_visible: Optional[bool] = None
+    # ✅ 新增：可见性提示（如"位于西方低空，建议找开阔地"）
+    visibility_note: Optional[str] = None
 
 
 class Narration(BaseModel):
@@ -73,6 +86,8 @@ class Narration(BaseModel):
     long: str
     fun_fact: Optional[str] = None
     observation_tip: Optional[str] = None
+    # ✅ 新增：LLM 生成的动态引导语，如"现在抬头看，那颗最亮的就是织女星"
+    live_guide: Optional[str] = None
 
 
 class TourStep(BaseModel):
@@ -84,7 +99,7 @@ class TourStep(BaseModel):
     narration: Narration
     estimated_minutes: int = 3
     next_hint: Optional[str] = None
-    actions: List[str] = Field(default_factory=lambda: ["next", "prev", "pause", "stop"])
+    actions: List[str] = Field(default_factory=lambda: ["next", "prev", "pause", "stop", "exit"])
 
 
 class TourPlan(BaseModel):
@@ -95,6 +110,9 @@ class TourPlan(BaseModel):
     difficulty: Literal["easy", "medium", "hard"] = "easy"
     steps: List[TourStep] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
+    # ✅ 新增：生成此计划时的实时上下文，便于前端展示
+    generated_at: Optional[str] = None
+    location_summary: Optional[str] = None
 
 
 class TourSessionResponse(BaseModel):
@@ -103,3 +121,19 @@ class TourSessionResponse(BaseModel):
     plan: Optional[TourPlan] = None
     current_step_index: int = 0
     message: str = ""
+    # ✅ 新增：如果用户问"现在能看到什么"，直接返回天体列表而非完整导览
+    visible_objects: Optional[List[TourTarget]] = None
+
+
+# ✅ 新增：自由问答请求/响应
+class ChatRequest(BaseModel):
+    text: str
+    client_timestamp: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    answer: str
+    # 可选：如果回答涉及具体天体，附带定位信息
+    referenced_targets: List[TourTarget] = Field(default_factory=list)
+    suggested_action: Optional[str] = None  # "start_tour" | "locate_star" | None

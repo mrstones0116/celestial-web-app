@@ -36,7 +36,7 @@ import httpx
 from fastapi import FastAPI, Query, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
-from tour.api import router as tour_router   # ← 放到最后
+from tour.api import router as tour_router, set_loader
 
 from PIL import Image
 import numpy as np
@@ -56,6 +56,9 @@ app.add_middleware(
 app.include_router(tour_router, prefix="/api/tour", tags=["tour"])
 
 loader = HYGDataLoader()
+
+# ✅ 新增：注入 loader 给 tour 模块
+set_loader(loader)
 
 _DEBUG_DIR = _BACKEND_DIR / "debug"
 _DEBUG_DIR.mkdir(exist_ok=True)

@@ -2,8 +2,7 @@ from typing import Dict, Any, Optional
 import uuid
 import time
 
-
-SESSION_TTL_SECONDS = 3600  # 1 小时未访问则回收
+SESSION_TTL_SECONDS = 3600
 
 
 class TourSessionStore:
@@ -32,6 +31,10 @@ class TourSessionStore:
             "plan": None,
             "history": [],
             "config": payload,
+            # ✅ 新增：自由问答历史
+            "chat_history": [],
+            # ✅ 新增：当前观测上下文快照
+            "observation_context": {},
         }
         return session_id
 
