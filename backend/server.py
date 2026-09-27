@@ -1,10 +1,10 @@
 """
 天球可视化系统 - FastAPI 后端
-照片识星 v11
-· 简洁提示词
-· 输出季节、星座、亮星、位置
-· 返回骨架星，过滤数字编号
-· 返回标注图，便于前端弹窗显示与保存
+照片识星 v13
+· 纯 VL 识别（不依赖 astrometry.net）
+· 提示词拆分任务：观察 → 找图案 → 判断 → 定位
+· 只画星点 + 星座标签，不画骨架连线
+· 过滤低置信度结果
 """
 import os
 import sys
@@ -40,7 +40,7 @@ from PIL import Image
 import numpy as np
 import cv2
 
-app = FastAPI(title="3D天球可视化系统 API", version="2.2.0")
+app = FastAPI(title="3D天球可视化系统 API", version="2.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,8 +53,6 @@ app.add_middleware(
 app.include_router(tour_router, prefix="/api/tour", tags=["tour"])
 
 loader = HYGDataLoader()
-
-# ✅ 新增：注入 loader 给 tour 模块
 set_loader(loader)
 
 _DEBUG_DIR = _BACKEND_DIR / "debug"
@@ -78,96 +76,43 @@ VL_MODEL = os.getenv("VL_MODEL", "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp").str
 VERIFY_MAX_MAG = float(os.getenv("VERIFY_MAX_MAG", "6.5"))
 DEBUG_VISION = os.getenv("DEBUG_VISION", "0") == "1"
 
+# ---- VL 识星的置信度门槛 ----
+MIN_CONF_DRAW = float(os.getenv("MIN_CONF_DRAW", "0.45"))
+
 
 # ==================== 88 星座标准名 ====================
 
 _CONSTELLATION_PAIRS = [
-    ("And", "Andromeda"),
-    ("Ant", "Antlia"),
-    ("Aps", "Apus"),
-    ("Aqr", "Aquarius"),
-    ("Aql", "Aquila"),
-    ("Ara", "Ara"),
-    ("Ari", "Aries"),
-    ("Aur", "Auriga"),
-    ("Boo", "Bootes"),
-    ("Cae", "Caelum"),
-    ("Cam", "Camelopardalis"),
-    ("Cnc", "Cancer"),
-    ("CMa", "Canis Major"),
-    ("CMi", "Canis Minor"),
-    ("Cap", "Capricornus"),
-    ("Car", "Carina"),
-    ("Cas", "Cassiopeia"),
-    ("Cen", "Centaurus"),
-    ("Cep", "Cepheus"),
-    ("Cet", "Cetus"),
-    ("Cha", "Chamaeleon"),
-    ("Cir", "Circinus"),
-    ("Col", "Columba"),
-    ("Com", "Coma Berenices"),
-    ("CrA", "Corona Australis"),
-    ("CrB", "Corona Borealis"),
-    ("Crv", "Corvus"),
-    ("Crt", "Crater"),
-    ("Cru", "Crux"),
-    ("Cyg", "Cygnus"),
-    ("Del", "Delphinus"),
-    ("Dor", "Dorado"),
-    ("Dra", "Draco"),
-    ("Equ", "Equuleus"),
-    ("Eri", "Eridanus"),
-    ("For", "Fornax"),
-    ("Gem", "Gemini"),
-    ("Gru", "Grus"),
-    ("Her", "Hercules"),
-    ("Hor", "Horologium"),
-    ("Hya", "Hydra"),
-    ("Hyi", "Hydrus"),
-    ("Ind", "Indus"),
-    ("Lac", "Lacerta"),
-    ("Leo", "Leo"),
-    ("LMi", "Leo Minor"),
-    ("Lep", "Lepus"),
-    ("Lib", "Libra"),
-    ("Lup", "Lupus"),
-    ("Lyn", "Lynx"),
-    ("Lyr", "Lyra"),
-    ("Men", "Mensa"),
-    ("Mic", "Microscopium"),
-    ("Mon", "Monoceros"),
-    ("Mus", "Musca"),
-    ("Nor", "Norma"),
-    ("Oct", "Octans"),
-    ("Oph", "Ophiuchus"),
-    ("Ori", "Orion"),
-    ("Peg", "Pegasus"),
-    ("Per", "Perseus"),
-    ("Phe", "Phoenix"),
-    ("Pic", "Pictor"),
-    ("Psc", "Pisces"),
-    ("PsA", "Piscis Austrinus"),
-    ("Pup", "Puppis"),
-    ("Pyx", "Pyxis"),
-    ("Ret", "Reticulum"),
-    ("Sge", "Sagitta"),
-    ("Sgr", "Sagittarius"),
-    ("Sco", "Scorpius"),
-    ("Scl", "Sculptor"),
-    ("Sct", "Scutum"),
-    ("Ser", "Serpens"),
-    ("Sex", "Sextans"),
-    ("Tau", "Taurus"),
-    ("Tel", "Telescopium"),
-    ("Tri", "Triangulum"),
-    ("TrA", "Triangulum Australe"),
-    ("Tuc", "Tucana"),
-    ("UMa", "Ursa Major"),
-    ("UMi", "Ursa Minor"),
-    ("Vel", "Vela"),
-    ("Vir", "Virgo"),
-    ("Vol", "Volans"),
-    ("Vul", "Vulpecula"),
+    ("And", "Andromeda"), ("Ant", "Antlia"), ("Aps", "Apus"),
+    ("Aqr", "Aquarius"), ("Aql", "Aquila"), ("Ara", "Ara"),
+    ("Ari", "Aries"), ("Aur", "Auriga"), ("Boo", "Bootes"),
+    ("Cae", "Caelum"), ("Cam", "Camelopardalis"), ("Cnc", "Cancer"),
+    ("CMa", "Canis Major"), ("CMi", "Canis Minor"),
+    ("Cap", "Capricornus"), ("Car", "Carina"), ("Cas", "Cassiopeia"),
+    ("Cen", "Centaurus"), ("Cep", "Cepheus"), ("Cet", "Cetus"),
+    ("Cha", "Chamaeleon"), ("Cir", "Circinus"), ("Col", "Columba"),
+    ("Com", "Coma Berenices"), ("CrA", "Corona Australis"),
+    ("CrB", "Corona Borealis"), ("Crv", "Corvus"), ("Crt", "Crater"),
+    ("Cru", "Crux"), ("Cyg", "Cygnus"), ("Del", "Delphinus"),
+    ("Dor", "Dorado"), ("Dra", "Draco"), ("Equ", "Equuleus"),
+    ("Eri", "Eridanus"), ("For", "Fornax"), ("Gem", "Gemini"),
+    ("Gru", "Grus"), ("Her", "Hercules"), ("Hor", "Horologium"),
+    ("Hya", "Hydra"), ("Hyi", "Hydrus"), ("Ind", "Indus"),
+    ("Lac", "Lacerta"), ("Leo", "Leo"), ("LMi", "Leo Minor"),
+    ("Lep", "Lepus"), ("Lib", "Libra"), ("Lup", "Lupus"),
+    ("Lyn", "Lynx"), ("Lyr", "Lyra"), ("Men", "Mensa"),
+    ("Mic", "Microscopium"), ("Mon", "Monoceros"), ("Mus", "Musca"),
+    ("Nor", "Norma"), ("Oct", "Octans"), ("Oph", "Ophiuchus"),
+    ("Ori", "Orion"), ("Peg", "Pegasus"), ("Per", "Perseus"),
+    ("Phe", "Phoenix"), ("Pic", "Pictor"), ("Psc", "Pisces"),
+    ("PsA", "Piscis Austrinus"), ("Pup", "Puppis"), ("Pyx", "Pyxis"),
+    ("Ret", "Reticulum"), ("Sge", "Sagitta"), ("Sgr", "Sagittarius"),
+    ("Sco", "Scorpius"), ("Scl", "Sculptor"), ("Sct", "Scutum"),
+    ("Ser", "Serpens"), ("Sex", "Sextans"), ("Tau", "Taurus"),
+    ("Tel", "Telescopium"), ("Tri", "Triangulum"),
+    ("TrA", "Triangulum Australe"), ("Tuc", "Tucana"),
+    ("UMa", "Ursa Major"), ("UMi", "Ursa Minor"), ("Vel", "Vela"),
+    ("Vir", "Virgo"), ("Vol", "Volans"), ("Vul", "Vulpecula"),
 ]
 
 _ABBR_TO_FULL = {abbr: full for abbr, full in _CONSTELLATION_PAIRS}
@@ -175,25 +120,13 @@ _FULL_LOWER_TO_ABBR = {full.lower(): abbr for abbr, full in _CONSTELLATION_PAIRS
 _ABBR_LOWER_TO_ABBR = {abbr.lower(): abbr for abbr, full in _CONSTELLATION_PAIRS}
 
 SEASON_ZH = {
-    "spring": "春季",
-    "summer": "夏季",
-    "autumn": "秋季",
-    "winter": "冬季",
-    "unknown": "不确定",
-    "": "",
+    "spring": "春季", "summer": "夏季",
+    "autumn": "秋季", "winter": "冬季",
+    "unknown": "不确定", "": "",
 }
 
 _ALLOWED_POSITIONS = {
-    "左上",
-    "上",
-    "右上",
-    "左",
-    "中央",
-    "右",
-    "左下",
-    "下",
-    "右下",
-    "不确定",
+    "左上", "上", "右上", "左", "中央", "右", "左下", "下", "右下", "不确定",
 }
 
 _POSITION_TO_BOX = {
@@ -327,54 +260,23 @@ def _clean_position(value: Any) -> str:
         return p
     p_lower = p.lower()
     position_map = {
-        "top left": "左上",
-        "left top": "左上",
-        "upper left": "左上",
-        "left upper": "左上",
-        "top": "上",
-        "upper": "上",
-        "top right": "右上",
-        "right top": "右上",
-        "upper right": "右上",
-        "right upper": "右上",
+        "top left": "左上", "left top": "左上",
+        "upper left": "左上", "left upper": "左上",
+        "top": "上", "upper": "上",
+        "top right": "右上", "right top": "右上",
+        "upper right": "右上", "right upper": "右上",
         "left": "左",
-        "center": "中央",
-        "centre": "中央",
-        "middle": "中央",
+        "center": "中央", "centre": "中央", "middle": "中央",
         "right": "右",
-        "bottom left": "左下",
-        "left bottom": "左下",
-        "lower left": "左下",
-        "left lower": "左下",
-        "bottom": "下",
-        "lower": "下",
-        "bottom right": "右下",
-        "right bottom": "右下",
-        "lower right": "右下",
-        "right lower": "右下",
+        "bottom left": "左下", "left bottom": "左下",
+        "lower left": "左下", "left lower": "左下",
+        "bottom": "下", "lower": "下",
+        "bottom right": "右下", "right bottom": "右下",
+        "lower right": "右下", "right lower": "右下",
     }
     if p_lower in position_map:
         return position_map[p_lower]
     return "不确定"
-
-
-def _clean_bbox(value: Any) -> List[float]:
-    if not isinstance(value, (list, tuple)) or len(value) != 4:
-        return []
-    try:
-        nums = [float(v) for v in value]
-    except Exception:
-        return []
-    if max(nums) > 1.5:
-        nums = [v / 1000.0 for v in nums]
-    x1, y1, x2, y2 = [_clamp(v) for v in nums]
-    if x2 < x1:
-        x1, x2 = x2, x1
-    if y2 < y1:
-        y1, y2 = y2, y1
-    if x2 - x1 < 0.02 or y2 - y1 < 0.02:
-        return []
-    return [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)]
 
 
 def _clean_bright_stars(items: Any) -> List[Dict[str, str]]:
@@ -389,12 +291,45 @@ def _clean_bright_stars(items: Any) -> List[Dict[str, str]]:
             continue
         if re.search(r"\d", name):
             continue
-        out.append(
-            {
-                "name": name,
-                "position": _clean_position(item.get("position")),
-            }
-        )
+        out.append({
+            "name": name,
+            "position": _clean_position(item.get("position")),
+        })
+    return out
+
+
+def _clean_vl_stars(items: Any) -> List[Dict[str, Any]]:
+    """
+    清洗 VL 返回的 stars 数组：
+      · x, y 归一化到 0~1
+      · 过滤明显越界、重复、无效的坐标
+      · 最多保留 8 颗（避免 VL 乱标）
+    """
+    if not isinstance(items, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in items[:12]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            x = float(item.get("x"))
+            y = float(item.get("y"))
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            continue
+        key = (round(x, 2), round(y, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": str(item.get("name", "")).strip(),
+            "x": round(x, 4),
+            "y": round(y, 4),
+        })
+        if len(out) >= 8:
+            break
     return out
 
 
@@ -478,12 +413,6 @@ def _select_skeleton_stars(
 # ==================== 图片准备 ====================
 
 def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, Any]:
-    """
-    返回：
-    · original_b64 / original_mime : 缩放后的原图（JPEG 高质量）
-    · adapted_b64 / adapted_mime   : CLAHE 暗部增强版（PNG 无损）
-    · original_pil / adapted_pil   : PIL 对象，供标注图使用
-    """
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
     scale = min(1.0, max_dim / max(w, h))
@@ -530,40 +459,68 @@ def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, 
 
 # ==================== Prompt ====================
 
-VL_PROMPT = """这是同一张夜空照片的两个版本：
+VL_PROMPT = """你是天文识别专家。这是同一张夜空照片的两个版本：
 图1：原图。
-图2：暗部提亮版。
+图2：暗部提亮版（暗星更容易看见）。
 
-请先解读这张图你看到了什么，再分析这可能是哪个季节的星空，具体都有什么星座和亮星，分别在哪里。
+请严格按照以下四步分析，不要跳步：
 
-要求：
-1. 不确定就降低置信度，或者返回 visible: false。
-2. 不要编造星座或亮星。
-3. 星座名使用标准英文名。
-4. 亮星名使用常见英文名；不确定就留空。
-5. 位置只能填：左上、上、右上、左、中央、右、左下、下、右下、不确定。
-6. 如果可以，请为每个星座给出画面范围 bbox：[x_min, y_min, x_max, y_max]，数值范围 0~1；不确定就填 []。
-7. 亮星名中不要输出数字编号。
-8. estimated_season 只能填：spring、summer、autumn、winter、unknown。
+【第一步 · 观察】
+描述照片内容：是否有银河？银河走向如何？有没有明显的亮星组成图案？画面噪点水平如何？
 
-只输出 JSON，不要 markdown：
+【第二步 · 找图案】
+在画面中寻找 3~7 颗星组成的、容易辨认的几何图案，例如：
+- 三颗几乎等距排列成一条直线（如猎户腰带）
+- 一个明显的"勺子"或"W"形（如北斗、仙后座）
+- 一个大的三角形或四边形（如夏季大三角、秋季四边形）
+- 一条弯曲的"钩子"或"S"形（如天蝎座尾部）
+请用自然语言描述你看到的图案。
+
+【第三步 · 判断星座】
+根据图案，判断最可能的星座。只判断你有把握的星座：
+- 如果只能猜到 1~2 个，就只返回 1~2 个
+- 如果完全认不出，visible 设为 false
+- 不要为了凑数而编造
+
+【第四步 · 定位】
+对每个你判断出的星座，给出你能确认的 3~7 颗主要亮星的位置：
+- x, y 为归一化坐标（0~1，左上角是 (0,0)，右下角是 (1,1)）
+- 允许坐标有误差（±0.05 也可接受），但【相对位置必须符合该星座的特征】：
+  · 猎户腰带三颗星必须近似排成一条直线
+  · 北斗七星必须形成勺子形
+  · 夏季大三角必须两两之间距离相当
+- 如果拿不准某颗星的位置，宁可不标它，也不要乱标
+
+【返回要求】
+- 星座名用标准英文名（如 Orion、Ursa Major、Cygnus）
+- 亮星名用常见英文名（如 Betelgeuse、Vega、Deneb）；不确定就留空字符串
+- confidence 要诚实：非常确定 ≥ 0.8，比较确定 0.5~0.7，不确定 ≤ 0.4
+- 画面里没有星座时 visible = false，constellations 返回空数组
+
+只输出 JSON，不要 markdown，不要解释：
+
 {
   "visible": true,
-  "image_description": "简短描述你看到的天空情况",
-  "estimated_season": "unknown",
+  "image_description": "20~60 字的画面描述",
+  "pattern_description": "用一句话描述找到的几何图案",
+  "estimated_season": "summer",
   "constellations": [
     {
-      "name": "英文名",
-      "confidence": 0.55,
+      "name": "Cygnus",
+      "confidence": 0.7,
       "position": "中央",
-      "bbox": [0.35, 0.30, 0.70, 0.80],
-      "bright_stars": [
-        {
-          "name": "英文名",
-          "position": "中央"
-        }
+      "stars": [
+        {"name": "Deneb",  "x": 0.45, "y": 0.20},
+        {"name": "Sadr",   "x": 0.50, "y": 0.42},
+        {"name": "Albireo","x": 0.55, "y": 0.68},
+        {"name": "Gienah", "x": 0.32, "y": 0.38},
+        {"name": "Delta Cygni", "x": 0.68, "y": 0.40}
       ],
-      "reason": "简短说明"
+      "bright_stars": [
+        {"name": "Deneb", "position": "上"},
+        {"name": "Albireo", "position": "下"}
+      ],
+      "reason": "十字形，Deneb 亮度突出，符合天鹅座"
     }
   ],
   "note": "一句话结论"
@@ -600,7 +557,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 
 async def _call_vl(images: list, prompt: str) -> dict:
-    """images: [{"b64": "...", "mime": "image/jpeg"}, ...]"""
     if not ZHIPU_API_KEY:
         return {"success": False, "error": "未配置 ZHIPU_API_KEY"}
 
@@ -608,16 +564,15 @@ async def _call_vl(images: list, prompt: str) -> dict:
     for img in images:
         content.append({
             "type": "image_url",
-            "image_url": {
-                "url": f"data:{img['mime']};base64,{img['b64']}"
-            }
+            "image_url": {"url": f"data:{img['mime']};base64,{img['b64']}"}
         })
 
     payload = {
         "model": VL_MODEL,
         "messages": [{"role": "user", "content": content}],
-        "max_tokens": 1024,
-        "temperature": 0.1,
+        "max_tokens": 2048,
+        "temperature": 0.0,     # 让输出最确定
+        "top_p": 0.2,           # 缩小采样空间
     }
     headers = {"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"}
 
@@ -627,7 +582,6 @@ async def _call_vl(images: list, prompt: str) -> dict:
             resp.raise_for_status()
             data = resp.json()
 
-            # ================= 安全解析 API 返回 =================
             if "error" in data:
                 err_msg = data["error"]
                 if isinstance(err_msg, dict):
@@ -643,7 +597,6 @@ async def _call_vl(images: list, prompt: str) -> dict:
                 return {"success": False, "error": f"API 返回数据异常(无message): {str(data)[:200]}", "raw_content": str(data)}
 
             raw = message.get("content", "")
-            # ================================================================
 
             if isinstance(raw, list):
                 raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict) and p.get("type") == "text")
@@ -669,9 +622,18 @@ async def _call_vl(images: list, prompt: str) -> dict:
 
 def _annotate_image(
     pil_img: Image.Image,
-    verified: List[Dict[str, Any]],
-    max_annotations: int = 6,
+    vl_items: List[Dict[str, Any]],
+    min_conf: float = 0.45,
+    max_constellations: int = 6,
 ) -> str:
+    """
+    在照片上标注 VL 识别出的星点 + 星座标签：
+      · 每个星座画出它标出的星点（圆点）
+      · 在星点几何中心写星座名
+      · 不画骨架连线（避免一根线错全盘崩）
+      · 只画 confidence >= min_conf 的星座
+      · 若某星座标出的星点不足 2 颗，则退化为在九宫格中心位置标一个标签
+    """
     from PIL import ImageDraw, ImageFont
 
     img = pil_img.convert("RGB").copy()
@@ -679,35 +641,58 @@ def _annotate_image(
     w, h = img.size
 
     try:
-        font_size = max(16, int(min(w, h) * 0.035))
+        font_size = max(18, int(min(w, h) * 0.028))
         font = ImageFont.truetype("arial.ttf", font_size)
     except Exception:
         font = ImageFont.load_default()
 
-    line_width = max(2, int(min(w, h) * 0.004))
+    star_radius = max(4, int(min(w, h) * 0.007))
 
-    for item in verified[:max_annotations]:
-        bbox = item.get("bbox") or []
-        if len(bbox) == 4:
-            x1, y1, x2, y2 = bbox
-        else:
-            pos = item.get("position", "不确定")
-            x1, y1, x2, y2 = _POSITION_TO_BOX.get(pos, _POSITION_TO_BOX["不确定"])
-
-        px1 = int(x1 * w)
-        py1 = int(y1 * h)
-        px2 = int(x2 * w)
-        py2 = int(y2 * h)
-
-        draw.rectangle(
-            [px1, py1, px2, py2],
-            outline=(0, 255, 255, 255),
-            width=line_width,
-        )
-
-        label = str(item.get("full") or item.get("abbr") or "")
-        if not label:
+    drawn = 0
+    for item in vl_items or []:
+        if not isinstance(item, dict):
             continue
+        try:
+            conf = float(item.get("confidence", 0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < min_conf:
+            continue
+
+        abbr = _norm(item.get("name", ""))
+        if not abbr:
+            continue
+
+        stars = _clean_vl_stars(item.get("stars"))
+
+        # ---- 收集像素坐标 ----
+        pts: List[tuple] = []
+        for s in stars:
+            pts.append((s["x"] * w, s["y"] * h))
+
+        # ---- 若星点不足，用九宫格中心作为标签位置 ----
+        if len(pts) < 2:
+            pos = _clean_position(item.get("position"))
+            x1, y1, x2, y2 = _POSITION_TO_BOX.get(pos, _POSITION_TO_BOX["不确定"])
+            cx = (x1 + x2) / 2 * w
+            cy = (y1 + y2) / 2 * h
+        else:
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+
+        # ---- 画星点 ----
+        for (px, py) in pts:
+            draw.ellipse(
+                [px - star_radius, py - star_radius,
+                 px + star_radius, py + star_radius],
+                fill=(255, 255, 0, 255),
+                outline=(255, 120, 0, 255),
+                width=2,
+            )
+
+        # ---- 写星座名（英文全名 + 置信度）----
+        label = _ABBR_TO_FULL.get(abbr, abbr)
+        label = f"{label}  {conf:.0%}"
 
         try:
             left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
@@ -716,17 +701,18 @@ def _annotate_image(
         except Exception:
             tw, th = draw.textsize(label, font=font)
 
-        text_y = max(0, py1 - th - 10)
+        tx = cx - tw / 2
+        ty = cy - th / 2
+
         draw.rectangle(
-            [px1, text_y, px1 + tw + 12, text_y + th + 10],
-            fill=(0, 0, 0, 180),
+            [tx - 8, ty - 5, tx + tw + 8, ty + th + 5],
+            fill=(0, 0, 0, 200),
         )
-        draw.text(
-            (px1 + 6, text_y + 5),
-            label,
-            font=font,
-            fill=(255, 255, 0, 255),
-        )
+        draw.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
+
+        drawn += 1
+        if drawn >= max_constellations:
+            break
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=False)
@@ -745,7 +731,6 @@ def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> 
             continue
         conf = _clamp(item.get("confidence", 0.5))
         position = _clean_position(item.get("position"))
-        bbox = _clean_bbox(item.get("bbox"))
 
         constellation_records = [
             s for s in hyg_stars
@@ -771,21 +756,19 @@ def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> 
 
         skeleton_stars = _select_skeleton_stars(matched_stars, limit=8)
 
-        out.append(
-            {
-                "abbr": abbr,
-                "full": _ABBR_TO_FULL.get(abbr, abbr),
-                "confidence": round(conf, 3),
-                "position": position,
-                "bbox": bbox,
-                "reason": str(item.get("reason", "")),
-                "bright_stars": _clean_bright_stars(item.get("bright_stars")),
-                "matched_stars": skeleton_stars,
-                "skeleton_stars": skeleton_stars,
-                "star_count": len(skeleton_stars),
-                "raw_star_count": len(matched_stars),
-            }
-        )
+        out.append({
+            "abbr": abbr,
+            "full": _ABBR_TO_FULL.get(abbr, abbr),
+            "confidence": round(conf, 3),
+            "position": position,
+            "stars": _clean_vl_stars(item.get("stars")),
+            "reason": str(item.get("reason", "")),
+            "bright_stars": _clean_bright_stars(item.get("bright_stars")),
+            "matched_stars": skeleton_stars,
+            "skeleton_stars": skeleton_stars,
+            "star_count": len(skeleton_stars),
+            "raw_star_count": len(matched_stars),
+        })
     out.sort(key=lambda x: -x["confidence"])
     return out
 
@@ -800,6 +783,7 @@ async def vl_status():
         "hint": "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"
         if not ZHIPU_API_KEY
         else "已就绪",
+        "min_conf_draw": MIN_CONF_DRAW,
     }
 
 
@@ -858,6 +842,7 @@ async def vl_identify(file: UploadFile = File(...)):
 
         visible = bool(feat.get("visible", True))
         image_description = str(feat.get("image_description", ""))
+        pattern_description = str(feat.get("pattern_description", ""))
         estimated_season = _normalize_season(feat.get("estimated_season", ""))
         vl_items = feat.get("constellations") or []
         note = str(feat.get("note", ""))
@@ -867,6 +852,7 @@ async def vl_identify(file: UploadFile = File(...)):
             f"items={[(i.get('name'), i.get('confidence')) for i in vl_items]}"
         )
         print(f"[vl] image_description: {image_description}")
+        print(f"[vl] pattern: {pattern_description}")
         print(f"[vl] note: {note}")
 
         if not visible or not vl_items:
@@ -882,7 +868,7 @@ async def vl_identify(file: UploadFile = File(...)):
                 "vl_season": estimated_season,
                 "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
                 "image_description": image_description,
-                "vl_pattern_description": image_description or note,
+                "vl_pattern_description": pattern_description or image_description or note,
                 "vl_note": note,
                 "raw_vl_features": feat,
                 "annotated_image": "",
@@ -899,10 +885,12 @@ async def vl_identify(file: UploadFile = File(...)):
 
         annotated_image = ""
         try:
-            annotate_source = imgs.get("adapted_pil")
+            annotate_source = imgs.get("original_pil")
             if annotate_source is None:
                 annotate_source = Image.open(BytesIO(img_bytes)).convert("RGB")
-            annotated_image = _annotate_image(annotate_source, verified)
+            annotated_image = _annotate_image(
+                annotate_source, vl_items, min_conf=MIN_CONF_DRAW
+            )
         except Exception:
             import traceback
             traceback.print_exc()
@@ -921,7 +909,7 @@ async def vl_identify(file: UploadFile = File(...)):
                 "vl_season": estimated_season,
                 "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
                 "image_description": image_description,
-                "vl_pattern_description": image_description or note,
+                "vl_pattern_description": pattern_description or image_description or note,
                 "vl_note": note,
                 "raw_vl_features": feat,
                 "annotated_image": annotated_image,
@@ -942,7 +930,7 @@ async def vl_identify(file: UploadFile = File(...)):
             "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
             "final_confidence": top["confidence"],
             "image_description": image_description,
-            "vl_pattern_description": image_description or note,
+            "vl_pattern_description": pattern_description or image_description or note,
             "vl_note": note,
             "raw_vl_features": feat,
             "annotated_image": annotated_image,

@@ -83,15 +83,24 @@ class ConstellationIdentifier:
         self.timeout = timeout
 
         # ---- 找 solve-field ----
-        self.solve_field = shutil.which("solve-field")
+        self.solve_field = None
+
+        # 1) 优先在 PATH 里找
+        for name in ("solve-field.exe", "solve-field"):
+            p = shutil.which(name)
+            if p:
+                self.solve_field = p
+                break
+
+        # 2) PATH 里没有，就在 ansvr 安装目录里找（exe 优先）
         if not self.solve_field:
-            for p in [
-                r"C:\Users\Peter Stones\AppData\Local\cygwin_ansvr\bin\solve-field.bat",
-                r"C:\Users\Peter Stones\AppData\Local\cygwin_ansvr\bin\solve-field",
-            ]:
+            ansvr_bin = r"C:\Users\Peter Stones\AppData\Local\cygwin_ansvr\bin"
+            for name in ("solve-field.exe", "solve-field", "solve-field.bat"):
+                p = os.path.join(ansvr_bin, name)
                 if os.path.exists(p):
                     self.solve_field = p
                     break
+
         if self.solve_field:
             print(f"✅ 找到 solve-field: {self.solve_field}")
         else:
@@ -260,13 +269,24 @@ class ConstellationIdentifier:
                 "--scale-high", str(self.scale_high),
                 "--downsample", "2",
                 "--cpulimit", str(self.timeout),
+                "--no-fits2fits",       # 新增：禁用 fits2fits
+                "--no-remove-lines",    # 新增：禁用 removelines.py
+                "--uniformize", "0",    # 新增：禁用 uniformize
                 png_path,
             ]
             print(f"[solve-field] {' '.join(cmd)}")
 
+            import os as _os
+            env = _os.environ.copy()
+            # 移除 astro_env 的 Python 路径，让 Cygwin 使用自己的 Python
+            env["PATH"] = r"C:\Users\Peter Stones\AppData\Local\cygwin_ansvr\bin" + ";" + env.get("PATH", "")
+            # 或者更精确地移除 astro_env 的路径
+            # env["PATH"] = ";".join(p for p in env["PATH"].split(";") if "astro_env" not in p.lower())
+
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=self.timeout + 30, cwd=work_dir,
+                env=env,  # 新增
                 encoding="utf-8", errors="replace",
             )
             print(f"[solve-field] 返回码: {proc.returncode}")
