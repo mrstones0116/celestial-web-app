@@ -12,7 +12,7 @@ from .schemas import (
 )
 from .session_store import tour_store
 from .planner import build_plan, build_dynamic_plan, detect_intent
-from .llm_client import parse_instruction, generate_narration
+from .llm_client import parse_instruction, generate_narration, generate_batch_narration
 from .astro_utils import compute_visible_objects, sort_observation_path
 
 # ✅ 注意：这里需要从主应用获取 HYGDataLoader。
@@ -128,7 +128,7 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
     parsed = await parse_instruction(req.text)
     intent = parsed["intent"]
     entities = parsed.get("entities", {})
-
+    
     print(
         f"[tour] intent={intent} "
         f"source={parsed.get('source')} "
@@ -140,32 +140,30 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
     loader = _get_loader()
     config = session.get("config", {})
 
-    # ✅ 如果用户提到"现在"或"今晚"，强制使用实时时间
-    if entities.get("time_expression") in ["现在", "今晚", "now", "tonight"]:
+    # ✅ 时间处理：如果提到“现在/今晚/明早”等，强制使用实时/近期时间
+    time_exp = entities.get("time_expression", "")
+    if any(kw in time_exp for kw in ["现在", "今晚", "now", "tonight", "明天", "日出", "凌晨"]):
         config.setdefault("observing_time", {})["use_real_time"] = True
 
-    # ---------- 分支1：实时可见查询 ----------
+    plan = None
+
+    # ==================== 分支1：实时可见查询 ====================
     if intent in ["what_visible", "recommend_order"]:
         try:
             stars = loader.get_stars(max_mag=5.5)
         except Exception:
             stars = loader.get_bright_stars(max_mag=4.0)
-
+            
         visible = compute_visible_objects(stars, config, min_altitude=15.0, limit=15)
-
         if intent == "recommend_order":
             visible = sort_observation_path(visible)
-
+            
         if not visible:
             return TourSessionResponse(
-                session_id=session_id,
-                status="empty",
-                plan=None,
-                current_step_index=0,
+                session_id=session_id, status="empty", plan=None, current_step_index=0,
                 message="当前时间地点下未找到足够亮的可见天体。请尝试到光污染更少的地方，或稍后再试。",
             ).model_dump()
-
-        # 生成动态导览计划
+            
         plan = build_dynamic_plan(
             stars=visible,
             config=config,
@@ -175,45 +173,62 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
             sort_by_path=(intent == "recommend_order"),
         )
 
-        # ✅ 异步增强解说（可选，若追求速度可注释掉）
-        # 为简化，这里先使用基础解说。如需 LLM 增强，可遍历 steps 调用 generate_narration。
+    # ==================== 分支2：主题导览（如夏季星空） ====================
+    else:
+        # 使用原有的静态模板生成计划（内部已包含可见性标注）
+        plan = build_plan(intent, config=config)
 
-        history = list(session.get("history", []))
-        history.append(req.text)
+    # ==================== 🌟 统一增强：为所有计划生成 LLM 个性化解说 ====================
+    if plan and plan.steps:
+        try:
+            stars_info = []
+            for step in plan.steps:
+                if step.targets:
+                    t = step.targets[0]
+                    stars_info.append({
+                        "name_zh": t.name_zh,
+                        "name_en": t.name_en,
+                        "constellation": t.constellation,
+                        "magnitude": t.magnitude,
+                        "altitude_deg": t.altitude_deg,
+                        "azimuth_deg": t.azimuth_deg,
+                    })
+            
+            prefs = config.get("preferences") or {}
+            narrations = await generate_batch_narration(
+                stars_info=stars_info,
+                location_summary="香港",
+                user_style=prefs.get("style", "story"),
+                locale="zh-CN",
+            )
+            
+            # 将 LLM 生成的解说写入每个步骤
+            for i, step in enumerate(plan.steps):
+                if i < len(narrations) and isinstance(narrations[i], dict):
+                    n = narrations[i]
+                    step.narration.short = n.get("short", step.narration.short)
+                    step.narration.long = n.get("long", step.narration.long)
+                    step.narration.best_time = n.get("best_time")
+                    step.narration.cultural_story = n.get("cultural_story")
+                    step.narration.observation_tip = n.get("observation_tip", step.narration.observation_tip)
+                    step.narration.fun_fact = n.get("fun_fact")
+                    
+            print(f"[tour] ✅ 已为 {len(narrations)} 颗星生成个性化解说")
+        except Exception as e:
+            print(f"[tour] ⚠️ 解说生成失败，使用模板兜底: {e}")
 
-        tour_store.update(session_id, {
-            "status": "ready",
-            "plan": plan.model_dump(),
-            "current_step_index": 0,
-            "history": history,
-            "last_intent": parsed,
-        })
-
-        return TourSessionResponse(
-            session_id=session_id,
-            status="ready",
-            plan=plan,
-            current_step_index=0,
-            message=f"已根据你的实时位置生成导览路线（{parsed.get('source')}）",
-        ).model_dump()
-
-    # ---------- 分支2：主题导览（原有逻辑，但增加可见性验证） ----------
-    plan = build_plan(intent, config=config)
-
-    # ✅ 可选：对静态模板生成的计划做可见性标注
-    # annotate_plan 已在 build_plan 内部调用，会填充 is_visible
-
+    # ==================== 保存状态并返回 ====================
     history = list(session.get("history", []))
     history.append(req.text)
-
+    
     tour_store.update(session_id, {
         "status": "ready",
-        "plan": plan.model_dump(),
+        "plan": plan.model_dump() if plan else None,
         "current_step_index": 0,
         "history": history,
         "last_intent": parsed,
     })
-
+    
     return TourSessionResponse(
         session_id=session_id,
         status="ready",
@@ -221,7 +236,6 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
         current_step_index=0,
         message=f"路线已生成（{parsed.get('source')}）",
     ).model_dump()
-
 
 # ==================== ✅ 新增：自由问答（导览中提问） ====================
 

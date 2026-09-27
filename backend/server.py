@@ -6,7 +6,6 @@
 · 返回骨架星，过滤数字编号
 · 返回标注图，便于前端弹窗显示与保存
 """
-
 import os
 import sys
 from pathlib import Path
@@ -32,7 +31,6 @@ from io import BytesIO
 from typing import Any, Dict, List
 
 import httpx
-
 from fastapi import FastAPI, Query, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
@@ -41,7 +39,6 @@ from tour.api import router as tour_router, set_loader
 from PIL import Image
 import numpy as np
 import cv2
-
 
 app = FastAPI(title="3D天球可视化系统 API", version="2.2.0")
 
@@ -76,10 +73,7 @@ ZHIPU_API_KEY = os.getenv(
     os.getenv("ZHIPU_API_KEY", "")
 ).strip()
 
-VL_MODEL = os.getenv(
-    "VL_MODEL",
-    "Qwen/Qwen3-VL-8B-Instruct"
-).strip()
+VL_MODEL = os.getenv("VL_MODEL", "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp").strip()
 
 VERIFY_MAX_MAG = float(os.getenv("VERIFY_MAX_MAG", "6.5"))
 DEBUG_VISION = os.getenv("DEBUG_VISION", "0") == "1"
@@ -295,59 +289,43 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 def _norm(name: str) -> str:
     if not name:
         return ""
-
     n = str(name).strip().lower()
     n = re.sub(r"[^a-z0-9]+", " ", n)
     n = re.sub(r"\s+", " ", n).strip()
-
     if not n:
         return ""
-
     compact = n.replace(" ", "")
-
     if compact in _ABBR_LOWER_TO_ABBR:
         return _ABBR_LOWER_TO_ABBR[compact]
-
     if n in _FULL_LOWER_TO_ABBR:
         return _FULL_LOWER_TO_ABBR[n]
-
     if n.startswith("the "):
         n2 = n[4:]
         if n2 in _FULL_LOWER_TO_ABBR:
             return _FULL_LOWER_TO_ABBR[n2]
-
     return ""
 
 
 def _normalize_season(value: Any) -> str:
     if not value:
         return "unknown"
-
     t = str(value).strip().lower()
-
     if any(k in t for k in ["spring", "春"]):
         return "spring"
-
     if any(k in t for k in ["summer", "夏"]):
         return "summer"
-
     if any(k in t for k in ["autumn", "fall", "秋"]):
         return "autumn"
-
     if any(k in t for k in ["winter", "冬"]):
         return "winter"
-
     return "unknown"
 
 
 def _clean_position(value: Any) -> str:
     p = str(value or "").strip()
-
     if p in _ALLOWED_POSITIONS:
         return p
-
     p_lower = p.lower()
-
     position_map = {
         "top left": "左上",
         "left top": "左上",
@@ -375,64 +353,48 @@ def _clean_position(value: Any) -> str:
         "lower right": "右下",
         "right lower": "右下",
     }
-
     if p_lower in position_map:
         return position_map[p_lower]
-
     return "不确定"
 
 
 def _clean_bbox(value: Any) -> List[float]:
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         return []
-
     try:
         nums = [float(v) for v in value]
     except Exception:
         return []
-
     if max(nums) > 1.5:
         nums = [v / 1000.0 for v in nums]
-
     x1, y1, x2, y2 = [_clamp(v) for v in nums]
-
     if x2 < x1:
         x1, x2 = x2, x1
-
     if y2 < y1:
         y1, y2 = y2, y1
-
     if x2 - x1 < 0.02 or y2 - y1 < 0.02:
         return []
-
     return [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)]
 
 
 def _clean_bright_stars(items: Any) -> List[Dict[str, str]]:
     if not isinstance(items, list):
         return []
-
     out: List[Dict[str, str]] = []
-
     for item in items[:10]:
         if not isinstance(item, dict):
             continue
-
         name = str(item.get("name", "")).strip()
-
         if not name:
             continue
-
         if re.search(r"\d", name):
             continue
-
         out.append(
             {
                 "name": name,
                 "position": _clean_position(item.get("position")),
             }
         )
-
     return out
 
 
@@ -452,32 +414,22 @@ def _star_mag(star: Dict[str, Any]) -> float:
 
 def _star_display_name(star: Dict[str, Any]) -> str:
     keys = ("proper", "name", "desig", "bayer", "bf")
-
     for key in keys:
         v = star.get(key)
-
         if v is None:
             continue
-
         v = str(v).strip()
-
         if not v:
             continue
-
         if v.lower() in {"nan", "none", "null"}:
             continue
-
         if re.fullmatch(r"[\d\s\-+./]+", v):
             continue
-
         if re.search(r"\b(hd|hip|hr|gliese|groombridge)\b", v, re.IGNORECASE):
             continue
-
         if re.search(r"\d", v):
             continue
-
         return v
-
     return ""
 
 
@@ -488,14 +440,12 @@ def _clean_star_for_output(star: Dict[str, Any], display_name: str) -> Dict[str,
         "constellation": _star_constellation(star),
         "mag": _star_mag(star),
     }
-
     for key in ("ra", "dec", "x", "y", "z"):
         if key in star:
             try:
                 out[key] = float(star[key])
             except Exception:
                 pass
-
     return out
 
 
@@ -505,42 +455,37 @@ def _select_skeleton_stars(
 ) -> List[Dict[str, Any]]:
     if not stars:
         return []
-
     sorted_stars = sorted(stars, key=_star_mag)
-
     chosen: List[Dict[str, Any]] = []
     seen_names = set()
-
     for s in sorted_stars:
         name = _star_display_name(s)
-
         if not name:
             continue
-
         key = name.lower()
-
         if key in seen_names:
             continue
-
         seen_names.add(key)
         chosen.append(_clean_star_for_output(s, name))
-
         if len(chosen) >= limit:
             break
-
     if not chosen:
         for s in sorted_stars[:3]:
             chosen.append(_clean_star_for_output(s, ""))
-
     return chosen
 
 
 # ==================== 图片准备 ====================
 
 def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, Any]:
+    """
+    返回：
+    · original_b64 / original_mime : 缩放后的原图（JPEG 高质量）
+    · adapted_b64 / adapted_mime   : CLAHE 暗部增强版（PNG 无损）
+    · original_pil / adapted_pil   : PIL 对象，供标注图使用
+    """
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
-
     scale = min(1.0, max_dim / max(w, h))
     if scale < 1:
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
@@ -549,16 +494,19 @@ def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, 
 
     lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
-
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     l2 = clahe.apply(l)
-
     adapted_arr = cv2.cvtColor(cv2.merge([l2, a, b]), cv2.COLOR_LAB2RGB)
     adapted = Image.fromarray(adapted_arr)
 
     def _b64_png(pil_img: Image.Image) -> str:
         buf = BytesIO()
         pil_img.save(buf, format="PNG", optimize=False)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    def _b64_jpg(pil_img: Image.Image, q: int = 95) -> str:
+        buf = BytesIO()
+        pil_img.save(buf, format="JPEG", quality=q)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
     if DEBUG_VISION:
@@ -571,8 +519,10 @@ def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, 
             pass
 
     return {
-        "original_b64": _b64_png(img),
+        "original_b64": _b64_jpg(img, q=95),
+        "original_mime": "image/jpeg",
         "adapted_b64": _b64_png(adapted),
+        "adapted_mime": "image/png",
         "original_pil": img,
         "adapted_pil": adapted,
     }
@@ -625,24 +575,18 @@ VL_PROMPT = """这是同一张夜空照片的两个版本：
 
 def _strip_fence(text: str) -> str:
     t = str(text).strip()
-
     if t.startswith("```"):
         lines = t.splitlines()
-
         if len(lines) > 1 and lines[0].strip().startswith("```"):
             lines = lines[1:]
-
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
-
         t = "\n".join(lines).strip()
-
     return t
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
     t = _strip_fence(text)
-
     try:
         return json.loads(t)
     except Exception:
@@ -652,82 +596,73 @@ def _extract_json(text: str) -> Dict[str, Any]:
                 return json.loads(m.group(0))
             except Exception:
                 pass
-
     raise ValueError("JSON parse failed")
 
 
-async def _call_vl(images: List[Dict[str, str]], prompt: str) -> Dict[str, Any]:
+async def _call_vl(images: list, prompt: str) -> dict:
+    """images: [{"b64": "...", "mime": "image/jpeg"}, ...]"""
     if not ZHIPU_API_KEY:
-        return {"success": False, "error": "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"}
+        return {"success": False, "error": "未配置 ZHIPU_API_KEY"}
 
     content = [{"type": "text", "text": prompt}]
-
     for img in images:
-        b64 = img.get("b64", "")
-        mime = img.get("mime", "image/png")
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime};base64,{b64}"
-                },
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{img['mime']};base64,{img['b64']}"
             }
-        )
+        })
 
     payload = {
         "model": VL_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": content,
-            }
-        ],
-        "max_tokens": 2048,
-        "temperature": 0.0,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 1024,
+        "temperature": 0.1,
     }
+    headers = {"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"}
 
-    headers = {
-        "Authorization": f"Bearer {ZHIPU_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         try:
             resp = await client.post(ZHIPU_API_URL, json=payload, headers=headers)
             resp.raise_for_status()
-
             data = resp.json()
-            raw = data["choices"][0]["message"]["content"]
+
+            # ================= 安全解析 API 返回 =================
+            if "error" in data:
+                err_msg = data["error"]
+                if isinstance(err_msg, dict):
+                    err_msg = err_msg.get("message", str(err_msg))
+                return {"success": False, "error": f"API 业务报错: {err_msg}", "raw_content": str(data)}
+
+            choices = data.get("choices")
+            if not choices:
+                return {"success": False, "error": f"API 返回数据异常(无choices): {str(data)[:200]}", "raw_content": str(data)}
+
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if not message:
+                return {"success": False, "error": f"API 返回数据异常(无message): {str(data)[:200]}", "raw_content": str(data)}
+
+            raw = message.get("content", "")
+            # ================================================================
 
             if isinstance(raw, list):
-                raw = " ".join(
-                    p.get("text", "")
-                    for p in raw
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
+                raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict) and p.get("type") == "text")
 
+            raw = _strip_fence(str(raw))
             try:
-                parsed = _extract_json(str(raw))
-                return {"success": True, "data": parsed}
-            except Exception:
-                return {
-                    "success": False,
-                    "error": f"模型返回非 JSON: {str(raw)[:400]}",
-                    "raw_content": str(raw),
-                }
+                return {"success": True, "data": json.loads(raw)}
+            except json.JSONDecodeError:
+                return {"success": False, "error": f"模型返回非 JSON: {raw[:400]}", "raw_content": raw}
 
         except httpx.HTTPStatusError as e:
             body = e.response.text[:400] if e.response is not None else ""
-            return {
-                "success": False,
-                "error": f"API HTTP {e.response.status_code}: {body}",
-            }
-
+            return {"success": False, "error": f"API HTTP {e.response.status_code}: {body}"}
         except httpx.TimeoutException:
-            return {"success": False, "error": "VL 调用超时"}
-
+            return {"success": False, "error": "VL 调用超时 (timeout)"}
         except Exception as e:
-            return {"success": False, "error": f"调用失败: {e}"}
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": f"调用失败: {str(e)}"}
 
 
 # ==================== 标注图 ====================
@@ -741,7 +676,6 @@ def _annotate_image(
 
     img = pil_img.convert("RGB").copy()
     draw = ImageDraw.Draw(img, "RGBA")
-
     w, h = img.size
 
     try:
@@ -754,7 +688,6 @@ def _annotate_image(
 
     for item in verified[:max_annotations]:
         bbox = item.get("bbox") or []
-
         if len(bbox) == 4:
             x1, y1, x2, y2 = bbox
         else:
@@ -773,7 +706,6 @@ def _annotate_image(
         )
 
         label = str(item.get("full") or item.get("abbr") or "")
-
         if not label:
             continue
 
@@ -785,12 +717,10 @@ def _annotate_image(
             tw, th = draw.textsize(label, font=font)
 
         text_y = max(0, py1 - th - 10)
-
         draw.rectangle(
             [px1, text_y, px1 + tw + 12, text_y + th + 10],
             fill=(0, 0, 0, 180),
         )
-
         draw.text(
             (px1 + 6, text_y + 5),
             label,
@@ -800,7 +730,6 @@ def _annotate_image(
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=False)
-
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
@@ -808,15 +737,12 @@ def _annotate_image(
 
 def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-
     for item in vl_items or []:
         if not isinstance(item, dict):
             continue
-
         abbr = _norm(item.get("name", ""))
         if not abbr:
             continue
-
         conf = _clamp(item.get("confidence", 0.5))
         position = _clean_position(item.get("position"))
         bbox = _clean_bbox(item.get("bbox"))
@@ -827,12 +753,10 @@ def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> 
         ]
 
         filtered: List[tuple] = []
-
         for s in constellation_records:
             mag = _star_mag(s)
             if mag <= VERIFY_MAX_MAG:
                 filtered.append((mag, s))
-
         filtered.sort(key=lambda x: x[0])
 
         if filtered:
@@ -856,17 +780,13 @@ def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> 
                 "bbox": bbox,
                 "reason": str(item.get("reason", "")),
                 "bright_stars": _clean_bright_stars(item.get("bright_stars")),
-
                 "matched_stars": skeleton_stars,
                 "skeleton_stars": skeleton_stars,
-
                 "star_count": len(skeleton_stars),
                 "raw_star_count": len(matched_stars),
             }
         )
-
     out.sort(key=lambda x: -x["confidence"])
-
     return out
 
 
@@ -898,10 +818,8 @@ async def vl_identify(file: UploadFile = File(...)):
 
     try:
         img_bytes = await file.read()
-
         if not img_bytes:
             return {"success": False, "message": "图片为空"}
-
         if len(img_bytes) > 15 * 1024 * 1024:
             return {"success": False, "message": "图片过大（>15MB）"}
 
@@ -913,8 +831,8 @@ async def vl_identify(file: UploadFile = File(...)):
             return {"success": False, "message": f"读取图片失败: {e}"}
 
         vl_images = [
-            {"b64": imgs["original_b64"], "mime": "image/png"},
-            {"b64": imgs["adapted_b64"], "mime": "image/png"},
+            {"b64": imgs["original_b64"], "mime": imgs["original_mime"]},
+            {"b64": imgs["adapted_b64"], "mime": imgs["adapted_mime"]},
         ]
 
         vl = await _call_vl(vl_images, VL_PROMPT)
@@ -929,7 +847,6 @@ async def vl_identify(file: UploadFile = File(...)):
             }
 
         feat = vl["data"]
-
         if not isinstance(feat, dict):
             return {
                 "success": False,
@@ -981,13 +898,10 @@ async def vl_identify(file: UploadFile = File(...)):
         verified = _verify(vl_items, hyg_stars)
 
         annotated_image = ""
-
         try:
             annotate_source = imgs.get("adapted_pil")
-
             if annotate_source is None:
                 annotate_source = Image.open(BytesIO(img_bytes)).convert("RGB")
-
             annotated_image = _annotate_image(annotate_source, verified)
         except Exception:
             import traceback
@@ -1016,7 +930,6 @@ async def vl_identify(file: UploadFile = File(...)):
             }
 
         top = verified[0]
-
         return {
             "success": True,
             "cross_check_passed": top["confidence"] >= 0.5,
@@ -1050,12 +963,10 @@ async def identify(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-
     if not ZHIPU_API_KEY:
         print("⚠️ 未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY")
     else:
         print(f"✅ API Key: {ZHIPU_API_KEY[:6]}...")
         print(f"✅ 模型: {VL_MODEL}")
         print(f"📁 debug: {_DEBUG_DIR}")
-
     uvicorn.run(app, host="0.0.0.0", port=8000)

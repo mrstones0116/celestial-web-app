@@ -343,3 +343,144 @@ async def generate_narration(
             "fun_fact": None,
             "observation_tip": "抬头寻找最亮的那颗。",
         }
+        
+# ==================== ✅ 新增：批量生成导览解说 ====================
+
+async def generate_batch_narration(
+    stars_info: List[Dict[str, Any]],
+    location_summary: str = "香港",
+    user_style: str = "story",
+    locale: str = "zh-CN",
+) -> List[Dict[str, str]]:
+    """
+    一次性为多颗星生成个性化解说。
+    返回与 stars_info 等长的列表，每项包含:
+    {
+      "short", "long", "best_time", "cultural_story",
+      "observation_tip", "fun_fact"
+    }
+    """
+    api_key = _get_api_key()
+    count = len(stars_info)
+
+    # LLM 不可用时的兜底模板
+    def _fallback_all():
+        return [
+            {
+                "short": s.get("name_zh", s.get("name_en", "")),
+                "long": f"{s.get('name_zh', '')}是一颗值得观测的天体。",
+                "best_time": "天黑后1小时内",
+                "cultural_story": None,
+                "observation_tip": "抬头寻找最亮的那颗。",
+                "fun_fact": None,
+            }
+            for s in stars_info
+        ]
+
+    if not api_key:
+        return _fallback_all()
+
+    # 构建星表摘要
+    stars_text = ""
+    for i, s in enumerate(stars_info):
+        stars_text += (
+            f"{i+1}. {s.get('name_zh', '')} / {s.get('name_en', '')}，"
+            f"星座：{s.get('constellation', '未知')}，"
+            f"视星等：{s.get('magnitude', '?')}，"
+            f"当前高度角：{s.get('altitude_deg', '?')}°，"
+            f"方位角：{s.get('azimuth_deg', '?')}°\n"
+        )
+
+    style_desc = {
+        "story": "浪漫、有故事感，适合普通观星爱好者",
+        "science": "严谨、数据丰富，适合天文发烧友",
+        "observation": "实用、侧重观测技巧",
+        "photography": "侧重拍摄建议和构图",
+    }.get(user_style, "通俗易懂，有趣味性")
+
+    prompt = f"""你是一位资深天文导览员，正在为位于{location_summary}的观星者做现场解说。
+当前是今晚观测。
+
+以下是今晚推荐的 {count} 颗天体：
+{stars_text}
+
+请为每颗星生成以下 6 个字段：
+- short：一句话介绍（不超过25字）
+- long：详细讲解（80-120字），包含这颗星的物理特征（颜色、距离、光谱型等）
+- best_time：今晚最佳观测时段（如"21:00-23:00"或"整晚可见"），根据当前高度角和运动趋势判断
+- cultural_story：与该星相关的文化典故、神话故事或历史轶事（50-100字）。如果没有著名典故，填 null
+- observation_tip：实用观测建议（如何用肉眼找到它、用什么设备看更好）
+- fun_fact：一个有趣的冷知识（可选，没有填 null）
+
+风格要求：{style_desc}
+语言：{"中文" if locale.startswith("zh") else "English"}
+
+严格输出 JSON 数组，不要 markdown，不要多余解释。格式：
+[
+  {{
+    "short": "...",
+    "long": "...",
+    "best_time": "...",
+    "cultural_story": "...",
+    "observation_tip": "...",
+    "fun_fact": "..."
+  }},
+  ...
+]
+
+数组长度必须等于 {count}。"""
+
+    payload = {
+        "model": _get_model(),
+        "messages": [
+            {"role": "system", "content": "你是天文导览专家，输出必须为纯 JSON 数组。"},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 2048,
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(_get_api_url(), json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        raw = data["choices"][0]["message"]["content"]
+        if isinstance(raw, list):
+            raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict))
+
+        # 提取 JSON 数组
+        text = _strip_fence(str(raw))
+        # 尝试直接解析
+        try:
+            result = json.loads(text)
+        except Exception:
+            # 尝试提取 [...] 部分
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            if m:
+                result = json.loads(m.group(0))
+            else:
+                return _fallback_all()
+
+        if not isinstance(result, list) or len(result) != count:
+            # 数量不匹配时，尽量对齐
+            fallback = _fallback_all()
+            for i in range(min(len(result), count)):
+                if isinstance(result[i], dict):
+                    fallback[i].update({
+                        k: result[i].get(k) for k in
+                        ["short", "long", "best_time", "cultural_story", "observation_tip", "fun_fact"]
+                        if result[i].get(k) is not None
+                    })
+            return fallback
+
+        return result
+
+    except Exception as e:
+        print(f"[tour] 批量解说生成失败: {e}")
+        return _fallback_all()

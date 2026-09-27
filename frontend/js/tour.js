@@ -201,28 +201,49 @@ const Tour = {
     if (p) p.style.display = show ? "block" : "none";
   },
 
-  _renderStep() {
+_renderStep() {
     if (!this.currentPlan) return;
     const steps = this.currentPlan.steps || [];
     const step = steps[this.currentStepIndex];
     if (!step) return;
 
-    // 标题
     document.getElementById("tour-title").textContent =
-      `${step.step_index + 1}/${steps.length} · ${step.title}`;
+        `${step.step_index + 1}/${steps.length} · ${step.title}`;
 
-    // 解说
-    const narr =
-      (step.narration && (step.narration.long || step.narration.short)) || "";
-    document.getElementById("tour-narration").textContent = narr;
+    // ✅ 构建富文本解说
+    const narr = step.narration || {};
+    let html = "";
 
-    // ✅ 新增：渲染目标星列表 + Navigate 按钮
+    // 主解说
+    html += `<p class="narr-long">${narr.long || narr.short || ""}</p>`;
+
+    // 最佳观测时段
+    if (narr.best_time) {
+        html += `<p class="narr-best-time">🕐 最佳观测：${narr.best_time}</p>`;
+    }
+
+    // 文化典故
+    if (narr.cultural_story) {
+        html += `<div class="narr-culture"><span class="narr-label">📖 典故</span><p>${narr.cultural_story}</p></div>`;
+    }
+
+    // 观测建议
+    if (narr.observation_tip) {
+        html += `<p class="narr-tip">🔭 ${narr.observation_tip}</p>`;
+    }
+
+    // 冷知识
+    if (narr.fun_fact) {
+        html += `<p class="narr-fun">💡 ${narr.fun_fact}</p>`;
+    }
+
+    document.getElementById("tour-narration").innerHTML = html;
+
+    // 目标星列表 + 导航按钮
     this._renderTargets(step);
-
-    // 自动切换视角（保持原有行为）
     this._applyCamera(step);
     this._showPanel(true);
-  },
+},
 
   // ✅ 新增：渲染每颗目标星 + 导航按钮
   _renderTargets(step) {

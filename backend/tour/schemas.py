@@ -80,15 +80,17 @@ class TourTarget(BaseModel):
     # ✅ 新增：可见性提示（如"位于西方低空，建议找开阔地"）
     visibility_note: Optional[str] = None
 
-
 class Narration(BaseModel):
     short: str
     long: str
     fun_fact: Optional[str] = None
     observation_tip: Optional[str] = None
-    # ✅ 新增：LLM 生成的动态引导语，如"现在抬头看，那颗最亮的就是织女星"
+    # ✅ 新增：今晚最佳观测时段
+    best_time: Optional[str] = None
+    # ✅ 新增：文化典故 / 神话故事
+    cultural_story: Optional[str] = None
+    # ✅ 新增：动态引导语
     live_guide: Optional[str] = None
-
 
 class TourStep(BaseModel):
     step_index: int
