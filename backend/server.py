@@ -1,16 +1,17 @@
 """
-天球可视化系统 - FastAPI 后端
-照片识星 v13
-· 纯 VL 识别（不依赖 astrometry.net）
-· 提示词拆分任务：观察 → 找图案 → 判断 → 定位
-· 只画星点 + 星座标签，不画骨架连线
-· 过滤低置信度结果
+天球可视化系统 - FastAPI 后端 · 照片识星 v1
+· 本地 OpenCV 检测 + K-means 聚类（强制 K=6）
+· 整图一次调用 VL，让 VL 同时判断全部 6 个簇
+· 前端可按颜色区分簇，VL 也按颜色对齐 id
+· 不输出 default 单图，只输出 K=6 的标注图
 """
 import os
 import sys
+import asyncio
+import json
+import re
 from pathlib import Path
 
-# ---- 1) 先算目录，再把 .env 提前加载 ----
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
@@ -23,12 +24,9 @@ try:
 except Exception as _e:
     print(f"⚠️  .env 加载失败: {_e}")
 
-# ---- 2) .env 加载完成后，再 import 其他模块 ----
-import json
 import base64
-import re
 from io import BytesIO
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException, UploadFile, File
@@ -36,12 +34,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
 from tour.api import router as tour_router, set_loader
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import cv2
 
-app = FastAPI(title="3D天球可视化系统 API", version="2.4.0")
-
+app = FastAPI(title="3D天球可视化系统 API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,7 +46,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.include_router(tour_router, prefix="/api/tour", tags=["tour"])
 
 loader = HYGDataLoader()
@@ -61,26 +57,41 @@ _DEBUG_DIR.mkdir(exist_ok=True)
 
 # ==================== 配置 ====================
 
+DEBUG_VISION = os.getenv("DEBUG_VISION", "0") == "1"
+MAX_DIM = int(os.getenv("VISION_MAX_DIM", "1280"))
+TOP_N = int(os.getenv("VISION_TOP_N", "100"))
+MAX_UPLOAD_BYTES = int(os.getenv("VISION_MAX_UPLOAD_MB", "20")) * 1024 * 1024
+EDGE_MARGIN_RATIO = float(os.getenv("VISION_EDGE_MARGIN", "0.10"))
+DETECT_SIGMA = float(os.getenv("VISION_DETECT_SIGMA", "6.0"))
+
+# 强制 K=6
+FORCED_K = 6
+CLUSTER_K_LIST = [FORCED_K]
+VL_CLUSTER_K = FORCED_K
+
+CLUSTER_MIN_STARS_PER_CLUSTER = int(
+    os.getenv("VISION_CLUSTER_MIN_STARS_PER_CLUSTER", "3")
+)
+
+# VL 配置
 ZHIPU_API_URL = os.getenv(
     "ZHIPU_API_URL",
-    "https://api-inference.modelscope.cn/v1/chat/completions"
+    "https://api-inference.modelscope.cn/v1/chat/completions",
 ).strip()
-
 ZHIPU_API_KEY = os.getenv(
     "MODELSCOPE_API_KEY",
-    os.getenv("ZHIPU_API_KEY", "")
+    os.getenv("ZHIPU_API_KEY", ""),
+).strip()
+VL_MODEL = os.getenv(
+    "VL_MODEL", "Qwen/Qwen3.8-Flash-Next"
 ).strip()
 
-VL_MODEL = os.getenv("VL_MODEL", "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp").strip()
-
-VERIFY_MAX_MAG = float(os.getenv("VERIFY_MAX_MAG", "6.5"))
-DEBUG_VISION = os.getenv("DEBUG_VISION", "0") == "1"
-
-# ---- VL 识星的置信度门槛 ----
-MIN_CONF_DRAW = float(os.getenv("MIN_CONF_DRAW", "0.45"))
+# 主星权重系数（亮度 + 距主星距离）
+WEIGHT_BRIGHTNESS = float(os.getenv("VISION_WEIGHT_BRIGHTNESS", "0.65"))
+WEIGHT_DISTANCE = float(os.getenv("VISION_WEIGHT_DISTANCE", "0.35"))
 
 
-# ==================== 88 星座标准名 ====================
+# ==================== 88 星座对照表 ====================
 
 _CONSTELLATION_PAIRS = [
     ("And", "Andromeda"), ("Ant", "Antlia"), ("Aps", "Apus"),
@@ -114,33 +125,23 @@ _CONSTELLATION_PAIRS = [
     ("UMa", "Ursa Major"), ("UMi", "Ursa Minor"), ("Vel", "Vela"),
     ("Vir", "Virgo"), ("Vol", "Volans"), ("Vul", "Vulpecula"),
 ]
+_ABBR_TO_FULL = {a: f for a, f in _CONSTELLATION_PAIRS}
+_ABBR_LOWER_TO_ABBR = {a.lower(): a for a, _ in _CONSTELLATION_PAIRS}
+_FULL_LOWER_TO_ABBR = {f.lower(): a for a, f in _CONSTELLATION_PAIRS}
 
-_ABBR_TO_FULL = {abbr: full for abbr, full in _CONSTELLATION_PAIRS}
-_FULL_LOWER_TO_ABBR = {full.lower(): abbr for abbr, full in _CONSTELLATION_PAIRS}
-_ABBR_LOWER_TO_ABBR = {abbr.lower(): abbr for abbr, full in _CONSTELLATION_PAIRS}
 
-SEASON_ZH = {
-    "spring": "春季", "summer": "夏季",
-    "autumn": "秋季", "winter": "冬季",
-    "unknown": "不确定", "": "",
-}
-
-_ALLOWED_POSITIONS = {
-    "左上", "上", "右上", "左", "中央", "右", "左下", "下", "右下", "不确定",
-}
-
-_POSITION_TO_BOX = {
-    "左上": (0.02, 0.02, 0.35, 0.35),
-    "上":   (0.34, 0.02, 0.66, 0.35),
-    "右上": (0.65, 0.02, 0.98, 0.35),
-    "左":   (0.02, 0.34, 0.35, 0.66),
-    "中央": (0.34, 0.34, 0.66, 0.66),
-    "右":   (0.65, 0.34, 0.98, 0.66),
-    "左下": (0.02, 0.65, 0.35, 0.98),
-    "下":   (0.34, 0.65, 0.66, 0.98),
-    "右下": (0.65, 0.65, 0.98, 0.98),
-    "不确定": (0.34, 0.34, 0.66, 0.66),
-}
+def _norm_constellation(name: str) -> str:
+    if not name:
+        return ""
+    n = re.sub(r"[^a-z0-9]+", " ", str(name).strip().lower()).strip()
+    if not n:
+        return ""
+    compact = n.replace(" ", "")
+    if compact in _ABBR_LOWER_TO_ABBR:
+        return _ABBR_LOWER_TO_ABBR[compact]
+    if n in _FULL_LOWER_TO_ABBR:
+        return _FULL_LOWER_TO_ABBR[n]
+    return ""
 
 
 # ==================== 基础数据 API ====================
@@ -155,8 +156,7 @@ async def get_status():
 
 @app.post("/api/load")
 async def load_data():
-    r = loader.load_data()
-    return r
+    return loader.load_data()
 
 
 @app.get("/api/stars")
@@ -209,326 +209,593 @@ async def get_spectral_info():
     }
 
 
-# ==================== 工具函数 ====================
+# ==================== 星点检测 ====================
 
-def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    try:
-        v = float(value)
-    except Exception:
-        return lo
-    return max(lo, min(hi, v))
+def _detect_brightest_stars(
+    image_bytes: bytes,
+    max_dim: int = MAX_DIM,
+    top_n: int = TOP_N,
+    edge_margin: float = EDGE_MARGIN_RATIO,
+) -> Dict[str, Any]:
+    pil = Image.open(BytesIO(image_bytes)).convert("RGB")
+    w0, h0 = pil.size
+    if max(w0, h0) > max_dim:
+        s = max_dim / float(max(w0, h0))
+        pil = pil.resize(
+            (max(1, int(w0 * s)), max(1, int(h0 * s))),
+            Image.LANCZOS,
+        )
+    w, h = pil.size
 
+    rgb = np.asarray(pil, dtype=np.uint8)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gray_s = cv2.GaussianBlur(gray, (3, 3), 0.6)
 
-def _norm(name: str) -> str:
-    if not name:
-        return ""
-    n = str(name).strip().lower()
-    n = re.sub(r"[^a-z0-9]+", " ", n)
-    n = re.sub(r"\s+", " ", n).strip()
-    if not n:
-        return ""
-    compact = n.replace(" ", "")
-    if compact in _ABBR_LOWER_TO_ABBR:
-        return _ABBR_LOWER_TO_ABBR[compact]
-    if n in _FULL_LOWER_TO_ABBR:
-        return _FULL_LOWER_TO_ABBR[n]
-    if n.startswith("the "):
-        n2 = n[4:]
-        if n2 in _FULL_LOWER_TO_ABBR:
-            return _FULL_LOWER_TO_ABBR[n2]
-    return ""
+    k = max(15, (min(h, w) // 15) | 1)
+    if k % 2 == 0:
+        k += 1
+    bg = cv2.medianBlur(gray_s.astype(np.uint8), k).astype(np.float32)
+    bg = cv2.GaussianBlur(bg, (0, 0), sigmaX=max(1.0, k / 4.0))
 
+    residual = np.clip(gray_s - bg, 0.0, None)
 
-def _normalize_season(value: Any) -> str:
-    if not value:
-        return "unknown"
-    t = str(value).strip().lower()
-    if any(k in t for k in ["spring", "春"]):
-        return "spring"
-    if any(k in t for k in ["summer", "夏"]):
-        return "summer"
-    if any(k in t for k in ["autumn", "fall", "秋"]):
-        return "autumn"
-    if any(k in t for k in ["winter", "冬"]):
-        return "winter"
-    return "unknown"
+    edge_margin = max(0.0, min(0.45, float(edge_margin)))
+    mx = int(round(w * edge_margin))
+    my = int(round(h * edge_margin))
+    mx = min(mx, max(0, w // 2 - 10))
+    my = min(my, max(0, h // 2 - 10))
 
+    inner_mask = np.zeros((h, w), dtype=bool)
+    if mx or my:
+        inner_mask[my:h - my, mx:w - mx] = True
+    else:
+        inner_mask[:] = True
 
-def _clean_position(value: Any) -> str:
-    p = str(value or "").strip()
-    if p in _ALLOWED_POSITIONS:
-        return p
-    p_lower = p.lower()
-    position_map = {
-        "top left": "左上", "left top": "左上",
-        "upper left": "左上", "left upper": "左上",
-        "top": "上", "upper": "上",
-        "top right": "右上", "right top": "右上",
-        "upper right": "右上", "right upper": "右上",
-        "left": "左",
-        "center": "中央", "centre": "中央", "middle": "中央",
-        "right": "右",
-        "bottom left": "左下", "left bottom": "左下",
-        "lower left": "左下", "left lower": "左下",
-        "bottom": "下", "lower": "下",
-        "bottom right": "右下", "right bottom": "右下",
-        "lower right": "右下", "right lower": "右下",
-    }
-    if p_lower in position_map:
-        return position_map[p_lower]
-    return "不确定"
+    inner = residual[inner_mask] if inner_mask.any() else residual.ravel()
 
+    med = float(np.median(inner))
+    mad = float(np.median(np.abs(inner - med)))
+    sigma = 1.4826 * mad
+    if sigma < 1e-3:
+        sigma = float(inner.std())
+    if sigma < 1e-3:
+        sigma = 1.0
 
-def _clean_bright_stars(items: Any) -> List[Dict[str, str]]:
-    if not isinstance(items, list):
-        return []
-    out: List[Dict[str, str]] = []
-    for item in items[:10]:
-        if not isinstance(item, dict):
+    thresh = max(med + DETECT_SIGMA * sigma, 6.0)
+    mask = (residual > thresh).astype(np.uint8)
+    mask[~inner_mask] = 0
+
+    roi = {"x0": mx, "y0": my, "x1": w - mx, "y1": h - my}
+
+    if int(mask.sum()) == 0:
+        return {
+            "stars": [], "pil": pil, "size": (w, h),
+            "threshold": float(thresh), "candidate_count": 0,
+            "edge_margin": edge_margin, "roi": roi,
+        }
+
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    max_area = max(20, int((min(h, w) * 0.02) ** 2))
+
+    candidates: List[Dict[str, Any]] = []
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 1 or area > max_area:
             continue
-        name = str(item.get("name", "")).strip()
-        if not name:
-            continue
-        if re.search(r"\d", name):
-            continue
-        out.append({
-            "name": name,
-            "position": _clean_position(item.get("position")),
+        ys, xs = np.where(labels == i)
+        vals = residual[ys, xs]
+        candidates.append({
+            "cx": float(xs.mean()), "cy": float(ys.mean()),
+            "flux": float(vals.sum()), "peak": float(vals.max()),
+            "area": area,
         })
-    return out
 
+    candidates.sort(key=lambda c: -c["flux"])
+    min_dist = max(5.0, min(h, w) * 0.008)
+    min_dist2 = min_dist * min_dist
 
-def _clean_vl_stars(items: Any) -> List[Dict[str, Any]]:
-    """
-    清洗 VL 返回的 stars 数组：
-      · x, y 归一化到 0~1
-      · 过滤明显越界、重复、无效的坐标
-      · 最多保留 8 颗（避免 VL 乱标）
-    """
-    if not isinstance(items, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    seen = set()
-    for item in items[:12]:
-        if not isinstance(item, dict):
-            continue
-        try:
-            x = float(item.get("x"))
-            y = float(item.get("y"))
-        except (TypeError, ValueError):
-            continue
-        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-            continue
-        key = (round(x, 2), round(y, 2))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({
-            "name": str(item.get("name", "")).strip(),
-            "x": round(x, 4),
-            "y": round(y, 4),
-        })
-        if len(out) >= 8:
+    accepted: List[Dict[str, Any]] = []
+    for c in candidates:
+        too_close = any(
+            (c["cx"] - a["cx"]) ** 2 + (c["cy"] - a["cy"]) ** 2 < min_dist2
+            for a in accepted
+        )
+        if not too_close:
+            accepted.append(c)
+        if len(accepted) >= top_n:
             break
-    return out
 
+    stars = []
+    for idx, c in enumerate(accepted):
+        stars.append({
+            "rank": idx + 1,
+            "x": round(c["cx"] / w, 5), "y": round(c["cy"] / h, 5),
+            "px": round(c["cx"], 2), "py": round(c["cy"], 2),
+            "brightness": round(c["flux"], 3),
+            "peak": round(c["peak"], 3), "area": c["area"],
+            "cluster": -1,
+        })
 
-def _star_constellation(star: Dict[str, Any]) -> str:
-    return str(star.get("constellation", star.get("con", ""))).strip()
-
-
-def _star_mag(star: Dict[str, Any]) -> float:
-    for key in ("mag", "magnitude", "Vmag", "v_mag"):
-        if key in star:
-            try:
-                return float(star[key])
-            except Exception:
-                pass
-    return 99.0
-
-
-def _star_display_name(star: Dict[str, Any]) -> str:
-    keys = ("proper", "name", "desig", "bayer", "bf")
-    for key in keys:
-        v = star.get(key)
-        if v is None:
-            continue
-        v = str(v).strip()
-        if not v:
-            continue
-        if v.lower() in {"nan", "none", "null"}:
-            continue
-        if re.fullmatch(r"[\d\s\-+./]+", v):
-            continue
-        if re.search(r"\b(hd|hip|hr|gliese|groombridge)\b", v, re.IGNORECASE):
-            continue
-        if re.search(r"\d", v):
-            continue
-        return v
-    return ""
-
-
-def _clean_star_for_output(star: Dict[str, Any], display_name: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
-        "name": display_name,
-        "display_name": display_name,
-        "constellation": _star_constellation(star),
-        "mag": _star_mag(star),
+    return {
+        "stars": stars, "pil": pil, "size": (w, h),
+        "threshold": float(thresh), "candidate_count": len(candidates),
+        "edge_margin": edge_margin, "roi": roi,
     }
-    for key in ("ra", "dec", "x", "y", "z"):
-        if key in star:
-            try:
-                out[key] = float(star[key])
-            except Exception:
-                pass
-    return out
 
 
-def _select_skeleton_stars(
+# ==================== K-means 聚类 ====================
+
+_CLUSTER_PALETTE = [
+    (255, 0, 0),      # 红
+    (255, 140, 0),    # 橙
+    (255, 0, 180),    # 品红
+    (180, 0, 255),    # 紫
+    (255, 200, 0),    # 金
+    (0, 200, 255),    # 天蓝
+    (0, 220, 100),    # 绿
+    (255, 100, 100),  # 珊瑚
+]
+
+
+def _kmeans(X: np.ndarray, k: int, n_iter: int = 100, seed: int = 42):
+    rng = np.random.default_rng(seed)
+    n = X.shape[0]
+    centers = [X[int(rng.integers(n))]]
+    for _ in range(k - 1):
+        d2 = np.min([np.sum((X - c) ** 2, axis=1) for c in centers], axis=0)
+        total = float(d2.sum())
+        if total <= 0:
+            centers.append(X[int(rng.integers(n))])
+        else:
+            centers.append(X[int(rng.choice(n, p=d2 / total))])
+    centers = np.asarray(centers, dtype=float)
+
+    labels = np.full(n, -1, dtype=int)
+    for _ in range(n_iter):
+        d = np.linalg.norm(X[:, None, :] - centers[None, :, :], axis=2)
+        new_labels = np.argmin(d, axis=1)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+        for i in range(k):
+            m = labels == i
+            if m.any():
+                centers[i] = X[m].mean(axis=0)
+    return labels, centers
+
+
+def _silhouette_score(X: np.ndarray, labels: np.ndarray) -> float:
+    n = X.shape[0]
+    uniq = np.unique(labels)
+    if len(uniq) < 2 or n < 4:
+        return -1.0
+    d = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=2)
+    sils = np.zeros(n, dtype=float)
+    for i in range(n):
+        same = labels == labels[i]
+        same[i] = False
+        if not same.any():
+            continue
+        a = float(d[i, same].mean())
+        b = min(
+            float(d[i, labels == c].mean())
+            for c in uniq if c != labels[i] and (labels == c).any()
+        )
+        denom = max(a, b)
+        sils[i] = (b - a) / denom if denom > 0 else 0.0
+    return float(sils.mean())
+
+
+def _build_cluster_payload(
     stars: List[Dict[str, Any]],
-    limit: int = 8,
+    labels: np.ndarray,
+    k: int,
+) -> Optional[List[Dict[str, Any]]]:
+    clusters = []
+    for cid in range(k):
+        idx = np.where(labels == cid)[0]
+        if len(idx) == 0:
+            return None
+        idx_list = [int(i) for i in idx]
+        members = [stars[i] for i in idx_list]
+
+        main = max(members, key=lambda s: s["brightness"])
+        max_b = max(m["brightness"] for m in members) or 1.0
+        dists = [
+            float(np.hypot(m["px"] - main["px"], m["py"] - main["py"]))
+            for m in members
+        ]
+        max_d = max(dists) if dists else 1.0
+        if max_d < 1e-6:
+            max_d = 1.0
+
+        enriched = []
+        for m, d in zip(members, dists):
+            b_norm = m["brightness"] / max_b
+            d_norm = 1.0 - d / max_d
+            weight = WEIGHT_BRIGHTNESS * b_norm + WEIGHT_DISTANCE * d_norm
+            enriched.append({
+                **m,
+                "dist_to_main": round(d, 2),
+                "weight": round(float(weight), 4),
+            })
+        enriched.sort(key=lambda x: -x["weight"])
+
+        edge_n = max(2, len(members) // 3)
+        edge_members = sorted(
+            enriched, key=lambda s: -s["dist_to_main"]
+        )[:edge_n]
+
+        xs = [m["px"] for m in members]
+        ys = [m["py"] for m in members]
+        bs = [m["brightness"] for m in members]
+
+        clusters.append({
+            "id": cid,
+            "star_count": len(members),
+            "center_x": round(float(np.mean(xs)), 2),
+            "center_y": round(float(np.mean(ys)), 2),
+            "bbox": {
+                "x0": round(float(min(xs)), 2), "y0": round(float(min(ys)), 2),
+                "x1": round(float(max(xs)), 2), "y1": round(float(max(ys)), 2),
+            },
+            "avg_brightness": round(float(np.mean(bs)), 3),
+            "main_star": {
+                "px": main["px"], "py": main["py"],
+                "x": main["x"], "y": main["y"],
+                "brightness": main["brightness"],
+            },
+            "stars": enriched,
+            "edge_stars": [
+                {"px": e["px"], "py": e["py"],
+                 "brightness": e["brightness"],
+                 "dist_to_main": e["dist_to_main"]}
+                for e in edge_members
+            ],
+            "neighbors": [],
+        })
+
+    for c in clusters:
+        cx, cy = c["center_x"], c["center_y"]
+        nbrs = []
+        for o in clusters:
+            if o["id"] == c["id"]:
+                continue
+            d = float(np.hypot(o["center_x"] - cx, o["center_y"] - cy))
+            nbrs.append({
+                "cluster_id": o["id"],
+                "center_x": o["center_x"],
+                "center_y": o["center_y"],
+                "star_count": o["star_count"],
+                "distance": round(d, 2),
+            })
+        nbrs.sort(key=lambda x: x["distance"])
+        c["neighbors"] = nbrs
+
+    clusters.sort(key=lambda c: -c["star_count"])
+    for new_id, c in enumerate(clusters):
+        c["id"] = new_id
+        for m in c["stars"]:
+            m["cluster"] = new_id
+    return clusters
+
+
+def _cluster_stars_all(
+    stars: List[Dict[str, Any]],
+    forced_k: Optional[int] = None,
+    min_stars_per_cluster: int = CLUSTER_MIN_STARS_PER_CLUSTER,
 ) -> List[Dict[str, Any]]:
-    if not stars:
+    n = len(stars)
+    if n == 0:
         return []
-    sorted_stars = sorted(stars, key=_star_mag)
-    chosen: List[Dict[str, Any]] = []
-    seen_names = set()
-    for s in sorted_stars:
-        name = _star_display_name(s)
-        if not name:
+
+    X = np.asarray([[s["px"], s["py"]] for s in stars], dtype=float)
+
+    if forced_k is not None:
+        k_list = [int(forced_k)] if int(forced_k) in CLUSTER_K_LIST else []
+    else:
+        k_list = CLUSTER_K_LIST
+
+    results: List[Dict[str, Any]] = []
+    for k in k_list:
+        if k < 2 or n < k * min_stars_per_cluster:
             continue
-        key = name.lower()
-        if key in seen_names:
+        labels, _ = _kmeans(X, k)
+        if len(np.unique(labels)) < k:
             continue
-        seen_names.add(key)
-        chosen.append(_clean_star_for_output(s, name))
-        if len(chosen) >= limit:
-            break
-    if not chosen:
-        for s in sorted_stars[:3]:
-            chosen.append(_clean_star_for_output(s, ""))
-    return chosen
+        counts = np.bincount(labels, minlength=k)
+        if int(np.min(counts)) < min_stars_per_cluster:
+            continue
+
+        clusters = _build_cluster_payload(stars, labels, k)
+        if clusters is None:
+            continue
+
+        score = _silhouette_score(X, labels)
+
+        star_dicts = []
+        for i, s in enumerate(stars):
+            ss = dict(s)
+            ss["cluster"] = int(labels[i])
+            star_dicts.append(ss)
+
+        results.append({
+            "k": int(k),
+            "score": round(float(score), 4),
+            "clusters": clusters,
+            "stars": star_dicts,
+        })
+
+    results.sort(key=lambda r: r["k"])
+    return results
 
 
-# ==================== 图片准备 ====================
+# ==================== 图片预处理（给 VL 用） ====================
 
-def _prepare_two_versions(image_bytes: bytes, max_dim: int = 1280) -> Dict[str, Any]:
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    w, h = img.size
-    scale = min(1.0, max_dim / max(w, h))
-    if scale < 1:
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+def _prepare_versions(pil: Image.Image) -> List[Dict[str, str]]:
+    rgb = np.asarray(pil.convert("RGB"), dtype=np.uint8)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
 
-    arr = np.array(img)
+    p_low, p_high = np.percentile(gray, [0.5, 99.5])
+    if p_high - p_low < 1.0:
+        p_high = p_low + 1.0
+    stretch = np.clip((gray - p_low) / (p_high - p_low), 0.0, 1.0)
+    bright_arr = (np.power(stretch, 0.5) * 255.0).astype(np.uint8)
+    bright = Image.fromarray(cv2.cvtColor(bright_arr, cv2.COLOR_GRAY2RGB))
 
-    lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    l2 = clahe.apply(l)
-    adapted_arr = cv2.cvtColor(cv2.merge([l2, a, b]), cv2.COLOR_LAB2RGB)
-    adapted = Image.fromarray(adapted_arr)
+    inverted = Image.fromarray(
+        cv2.cvtColor(255 - bright_arr, cv2.COLOR_GRAY2RGB)
+    )
 
-    def _b64_png(pil_img: Image.Image) -> str:
+    def _b64(im: Image.Image) -> str:
         buf = BytesIO()
-        pil_img.save(buf, format="PNG", optimize=False)
+        im.save(buf, format="PNG", optimize=True)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    def _b64_jpg(pil_img: Image.Image, q: int = 95) -> str:
-        buf = BytesIO()
-        pil_img.save(buf, format="JPEG", quality=q)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return [
+        {"b64": _b64(pil.convert("RGB")), "mime": "image/png", "label": "原图"},
+        {"b64": _b64(bright), "mime": "image/png", "label": "提亮图"},
+        {"b64": _b64(inverted), "mime": "image/png", "label": "反相图"},
+    ]
 
-    if DEBUG_VISION:
+
+# ==================== 字体缓存 ====================
+
+_FONT_CACHE: Dict[int, Any] = {}
+
+
+def _load_font(size: int):
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    font = None
+    for name in ("arial.ttf", "DejaVuSans-Bold.ttf", "msyh.ttc",
+                 "simhei.ttf", "DejaVuSans.ttf"):
         try:
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            img.save(_DEBUG_DIR / f"{ts}_original.png")
-            adapted.save(_DEBUG_DIR / f"{ts}_adapted.png")
+            font = ImageFont.truetype(name, size)
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+    _FONT_CACHE[size] = font
+    return font
+
+
+# ==================== 整图标注（给 VL 用） ====================
+
+def _annotate_cluster_for_vl(
+    pil: Image.Image,
+    cluster: Dict[str, Any],
+    all_clusters: List[Dict[str, Any]],
+) -> str:
+    """
+    整图标注：所有簇用不同颜色，主星画大圈 + 白心 + 簇编号。
+    参数 cluster 保留仅为兼容签名，实际不使用。
+    """
+    img = pil.convert("RGB").copy()
+    draw = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    r_base = max(4.0, min(w, h) * 0.007)
+    font = _load_font(max(16, int(min(w, h) * 0.022)))
+
+    for c in all_clusters:
+        cid = c["id"]
+        color = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
+        main = c["main_star"]
+
+        # 成员星（实心圆）
+        for s in c["stars"]:
+            px, py = float(s["px"]), float(s["py"])
+            r = r_base * 0.75
+            draw.ellipse(
+                [px - r, py - r, px + r, py + r],
+                fill=(color[0], color[1], color[2], 255),
+                outline=(
+                    max(0, color[0] - 80),
+                    max(0, color[1] - 80),
+                    max(0, color[2] - 80),
+                    255,
+                ),
+                width=1,
+            )
+
+        # 主星：大圈 + 白心
+        mx, my = float(main["px"]), float(main["py"])
+        R = r_base * 2.2
+        draw.ellipse(
+            [mx - R, my - R, mx + R, my + R],
+            outline=(color[0], color[1], color[2], 255),
+            width=max(2, int(r_base * 0.8)),
+        )
+        draw.ellipse(
+            [mx - r_base * 0.6, my - r_base * 0.6,
+             mx + r_base * 0.6, my + r_base * 0.6],
+            fill=(255, 255, 255, 255),
+        )
+
+        # 簇编号
+        try:
+            label = f"C{cid}"
+            l, t, rr, b = draw.textbbox((0, 0), label, font=font)
+            tw, th = rr - l, b - t
+            tx = mx + R + 4
+            ty = my - th / 2
+            if tx + tw + 6 > w:
+                tx = mx - R - tw - 10
+            if tx < 2:
+                tx = 2
+            if ty < 2:
+                ty = 2
+            if ty + th + 4 > h:
+                ty = h - th - 4
+            draw.rectangle(
+                [tx - 3, ty - 2, tx + tw + 3, ty + th + 2],
+                fill=(0, 0, 0, 195),
+            )
+            draw.text((tx, ty), label, font=font,
+                      fill=(color[0], color[1], color[2], 255))
         except Exception:
             pass
 
-    return {
-        "original_b64": _b64_jpg(img, q=95),
-        "original_mime": "image/jpeg",
-        "adapted_b64": _b64_png(adapted),
-        "adapted_mime": "image/png",
-        "original_pil": img,
-        "adapted_pil": adapted,
-    }
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=False)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-# ==================== Prompt ====================
+# ==================== VL Prompt & 调用 ====================
 
-VL_PROMPT = """你是天文识别专家。这是同一张夜空照片的两个版本：
-图1：原图。
-图2：暗部提亮版（暗星更容易看见）。
+FULL_IMAGE_VL_PROMPT = """你是一名天文识星专家。这是同一张星空照片的 3 个版本（原图 / 提亮图 / 反相图）。
 
-请严格按照以下四步分析，不要跳步：
+照片中已经用【{k} 种不同颜色】的圆点标出了 {k} 个星群（cluster），每个星群可能对应一个星座。
+每簇的**主星**用【大圆圈 + 中心白点】标出，旁边有小标签 C0~C{k_minus_1}。
 
-【第一步 · 观察】
-描述照片内容：是否有银河？银河走向如何？有没有明显的亮星组成图案？画面噪点水平如何？
+【颜色 → 簇 对照表】
+{cluster_table}
 
-【第二步 · 找图案】
-在画面中寻找 3~7 颗星组成的、容易辨认的几何图案，例如：
-- 三颗几乎等距排列成一条直线（如猎户腰带）
-- 一个明显的"勺子"或"W"形（如北斗、仙后座）
-- 一个大的三角形或四边形（如夏季大三角、秋季四边形）
-- 一条弯曲的"钩子"或"S"形（如天蝎座尾部）
-请用自然语言描述你看到的图案。
+【所有簇的量化信息】
+{cluster_details}
 
-【第三步 · 判断星座】
-根据图案，判断最可能的星座。只判断你有把握的星座：
-- 如果只能猜到 1~2 个，就只返回 1~2 个
-- 如果完全认不出，visible 设为 false
-- 不要为了凑数而编造
+【任务】
+对**每一个簇**，判断它最可能对应的星座（88 星座之一）。每个簇独立判断。
 
-【第四步 · 定位】
-对每个你判断出的星座，给出你能确认的 3~7 颗主要亮星的位置：
-- x, y 为归一化坐标（0~1，左上角是 (0,0)，右下角是 (1,1)）
-- 允许坐标有误差（±0.05 也可接受），但【相对位置必须符合该星座的特征】：
-  · 猎户腰带三颗星必须近似排成一条直线
-  · 北斗七星必须形成勺子形
-  · 夏季大三角必须两两之间距离相当
-- 如果拿不准某颗星的位置，宁可不标它，也不要乱标
+【判断要点】
+1. 每簇的**主星**（大圆圈白心）权重最高，是形状锚点
+2. 越亮、离主星越近的成员星越可信
+3. 边缘星可能属于邻近簇，不要强行纳入当前星座形状
+4. 参考邻近簇的颜色和位置，相邻簇的星也有微小可能属于当前簇，但优先考虑主星和簇内成员
+5. 注意图像上的颜色和 C 编号，严格对齐 JSON 里的 id，不要错位
 
-【返回要求】
-- 星座名用标准英文名（如 Orion、Ursa Major、Cygnus）
-- 亮星名用常见英文名（如 Betelgeuse、Vega、Deneb）；不确定就留空字符串
-- confidence 要诚实：非常确定 ≥ 0.8，比较确定 0.5~0.7，不确定 ≤ 0.4
-- 画面里没有星座时 visible = false，constellations 返回空数组
+【最终裁决规则（务必严格遵守）】
+1. **取置信度最高的星座**作为该簇的最终判定结果，填入 `constellation` / `constellation_abbr`。
+   每簇只能给一个最终答案，不要模糊两可。
+2. **必须结合现实世界中星座在天球上的相邻关系**做交叉校验与最终裁决：
+   - 相邻簇判出的星座在天球上必须**相邻、相接或属于同一片天区**；
+   - 若两个相邻簇分别判出天球上完全不相邻的星座（例如一簇 Orion、相邻簇却判 Cygnus），
+     必须重新评估，调整其中**置信度较低**的那一簇，使整体自洽；
+   - 若多个簇落在同一片连续天区（如夏季大三角、天蝎-人马区域），
+     则整体判定的 sky_region / summary 必须与这些相邻星座一致。
+   - 常见相邻星座参考：
+     * Cygnus ↔ Lyra / Aquila / Vulpecula / Cepheus / Draco / Pegasus / Lacerta
+     * Lyra ↔ Cygnus / Hercules / Draco / Vulpecula
+     * Aquila ↔ Cygnus / Lyra / Sagitta / Delphinus / Sagittarius / Scutum / Ophiuchus / Hercules / Aquarius
+     * Sagittarius ↔ Scorpius / Ophiuchus / Aquila / Scutum / Corona Australis / Telescopium / Capricornus / Indus
+     * Scorpius ↔ Sagittarius / Ophiuchus / Libra / Corona Australis / Lupus / Norma / Ara
+     * Cassiopeia ↔ Cepheus / Camelopardalis / Perseus / Andromeda / Lacerta
+     * Orion ↔ Taurus / Gemini / Monoceros / Lepus / Eridanus
+     * Taurus ↔ Orion / Gemini / Auriga / Perseus / Aries / Cetus / Eridanus
+     * Ursa Major ↔ Ursa Minor / Draco / Bootes / Canes Venatici / Leo / Leo Minor / Lynx / Camelopardalis
+     * Ursa Minor ↔ Ursa Major / Draco / Cepheus / Camelopardalis
+     * Crux ↔ Centaurus / Musca / Carina
+3. `confidence` 为最终置信度（0~1）。若最佳星座的 confidence < 0.3，
+   视为低置信，应在 `reason` / `edge_note` 里说明不确定点。
+4. `alternative` 按置信度降序给出前 1~3 个候选，每个候选说明其判断依据。
+5. 所有簇的最终判定必须构成一片**天球上物理自洽的连续区域**；
+   若不满足，请回到第 2 条重新调整最低置信度的簇。
 
-只输出 JSON，不要 markdown，不要解释：
-
-{
-  "visible": true,
-  "image_description": "20~60 字的画面描述",
-  "pattern_description": "用一句话描述找到的几何图案",
-  "estimated_season": "summer",
-  "constellations": [
-    {
-      "name": "Cygnus",
-      "confidence": 0.7,
-      "position": "中央",
-      "stars": [
-        {"name": "Deneb",  "x": 0.45, "y": 0.20},
-        {"name": "Sadr",   "x": 0.50, "y": 0.42},
-        {"name": "Albireo","x": 0.55, "y": 0.68},
-        {"name": "Gienah", "x": 0.32, "y": 0.38},
-        {"name": "Delta Cygni", "x": 0.68, "y": 0.40}
+【输出格式】只输出 JSON，不要 markdown，不要解释：
+{{
+  "clusters": [
+    {{
+      "id": 0,
+      "constellation": "Orion",
+      "constellation_abbr": "Ori",
+      "confidence": 0.82,
+      "reason": "主星为参宿四（Betelgeuse），三星腰带（参宿一/二/三）清晰可见，四角亮星构成猎户主体；与相邻 Taurus / Gemini 簇在天球上自洽",
+      "alternative": [
+        {{"name": "Taurus", "confidence": 0.28, "reason": "若主星实为毕宿五则可能是金牛座，但缺少 V 形毕星团结构"}}
       ],
-      "bright_stars": [
-        {"name": "Deneb", "position": "上"},
-        {"name": "Albireo", "position": "下"}
+      "shape_description": "四边形主体 + 中央三星腰带 + 下方剑状星云",
+      "edge_note": "右下角一颗边缘星可能是大犬座天狼星（Sirius）"
+    }},
+    {{
+      "id": 1,
+      "constellation": "Taurus",
+      "constellation_abbr": "Tau",
+      "confidence": 0.71,
+      "reason": "主星为毕宿五（Aldebaran），呈 V 形毕星团结构，附近可见昴星团；与相邻 Orion / Auriga 簇在天球上相邻",
+      "alternative": [
+        {{"name": "Auriga", "confidence": 0.25, "reason": "V 形也可联想五车二附近，但缺少御夫五边形"}}
       ],
-      "reason": "十字形，Deneb 亮度突出，符合天鹅座"
-    }
+      "shape_description": "V 形毕星团 + 牛角尖指向西北",
+      "edge_note": "西北侧一串密集小星可能是昴星团（M45），仍属金牛座"
+    }},
+    {{
+      "id": 2,
+      "constellation": "Canis Major",
+      "constellation_abbr": "CMa",
+      "confidence": 0.68,
+      "reason": "主星为天狼星（Sirius），全图最亮，附近有弧矢一等亮星群；与相邻 Orion 簇在天球上自洽",
+      "alternative": [
+        {{"name": "Canis Minor", "confidence": 0.22, "reason": "若主星为南河三则可能是小犬座，但缺少单独亮星对"}}
+      ],
+      "shape_description": "天狼星领衔的散开星群，无明显几何轮廓",
+      "edge_note": "北侧边缘星可能是小犬座南河三（Procyon）"
+    }},
+    {{
+      "id": 3,
+      "constellation": "Auriga",
+      "constellation_abbr": "Aur",
+      "confidence": 0.60,
+      "reason": "主星为五车二（Capella），五颗亮星构成近似五边形；与相邻 Taurus / Gemini 簇在天球上相邻",
+      "alternative": [
+        {{"name": "Perseus", "confidence": 0.20, "reason": "若星群呈长条弧线则可能是英仙座，但缺少长链结构"}}
+      ],
+      "shape_description": "五边形轮廓，顶点为五车二",
+      "edge_note": "东南角一颗星可能是金牛座 β（Elnath），历史上曾共享御夫/金牛边界"
+    }},
+    {{
+      "id": 4,
+      "constellation": "Gemini",
+      "constellation_abbr": "Gem",
+      "confidence": 0.55,
+      "reason": "主星为北河三（Pollux），附近北河二（Castor）构成双子头部一对亮星；与相邻 Orion / Auriga 簇在天球上相邻",
+      "alternative": [
+        {{"name": "Cancer", "confidence": 0.15, "reason": "若星群较暗且呈散开状则可能是巨蟹座，但缺少鬼星团"}}
+      ],
+      "shape_description": "两条平行亮星链由头部向下延伸",
+      "edge_note": "南端一颗暗星可能是巨蟹座边界星，注意不要误纳"
+    }},
+    {{
+      "id": 5,
+      "constellation": "Canis Minor",
+      "constellation_abbr": "CMi",
+      "confidence": 0.48,
+      "reason": "主星为南河三（Procyon），仅两颗亮星构成简短线；与相邻 Orion / Canis Major 簇在天球上自洽",
+      "alternative": [
+        {{"name": "Monoceros", "confidence": 0.18, "reason": "该天区暗星多属麒麟座，但缺少可辨形状"}}
+      ],
+      "shape_description": "两颗亮星组成极简短连线",
+      "edge_note": "西南侧弱星密集区多为麒麟座，不必强行归入本簇"
+    }}
   ],
-  "note": "一句话结论"
-}
+  "summary": "整张照片覆盖猎户座经金牛座至大犬座、御夫座至双子座一带的冬季天区",
+  "sky_region": "冬季大三角 / 冬季六边形区域（Orion–Taurus–Auriga–Gemini–Canis Major–Canis Minor）"
+}}
 """
 
-
-# ==================== VL 调用 ====================
 
 def _strip_fence(text: str) -> str:
     t = str(text).strip()
@@ -542,419 +809,705 @@ def _strip_fence(text: str) -> str:
     return t
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
-    t = _strip_fence(text)
-    try:
-        return json.loads(t)
-    except Exception:
-        m = re.search(r"\{.*\}", t, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
-    raise ValueError("JSON parse failed")
-
-
-async def _call_vl(images: list, prompt: str) -> dict:
+async def _call_vl_for_cluster(
+    images: List[Dict[str, str]],
+    cluster_prompt: str,
+    max_retries: int = 4,
+) -> Dict[str, Any]:
+    """整图调用；支持 429 指数退避重试。"""
     if not ZHIPU_API_KEY:
-        return {"success": False, "error": "未配置 ZHIPU_API_KEY"}
+        return {"success": False, "error": "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"}
 
-    content = [{"type": "text", "text": prompt}]
+    content = [{"type": "text", "text": cluster_prompt}]
     for img in images:
         content.append({
             "type": "image_url",
-            "image_url": {"url": f"data:{img['mime']};base64,{img['b64']}"}
+            "image_url": {"url": f"data:{img['mime']};base64,{img['b64']}"},
         })
 
     payload = {
         "model": VL_MODEL,
         "messages": [{"role": "user", "content": content}],
-        "max_tokens": 2048,
-        "temperature": 0.0,     # 让输出最确定
-        "top_p": 0.2,           # 缩小采样空间
+        "max_tokens": 3000,
+        "temperature": 0.1,
+        "top_p": 0.2,
     }
-    headers = {"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {ZHIPU_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(ZHIPU_API_URL, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+    delay = 2.0
+    last_err = ""
 
-            if "error" in data:
-                err_msg = data["error"]
-                if isinstance(err_msg, dict):
-                    err_msg = err_msg.get("message", str(err_msg))
-                return {"success": False, "error": f"API 业务报错: {err_msg}", "raw_content": str(data)}
-
-            choices = data.get("choices")
-            if not choices:
-                return {"success": False, "error": f"API 返回数据异常(无choices): {str(data)[:200]}", "raw_content": str(data)}
-
-            message = choices[0].get("message") if isinstance(choices[0], dict) else None
-            if not message:
-                return {"success": False, "error": f"API 返回数据异常(无message): {str(data)[:200]}", "raw_content": str(data)}
-
-            raw = message.get("content", "")
-
-            if isinstance(raw, list):
-                raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict) and p.get("type") == "text")
-
-            raw = _strip_fence(str(raw))
+    for attempt in range(max_retries):
+        async with httpx.AsyncClient(timeout=300.0) as client:
             try:
-                return {"success": True, "data": json.loads(raw)}
-            except json.JSONDecodeError:
-                return {"success": False, "error": f"模型返回非 JSON: {raw[:400]}", "raw_content": raw}
+                resp = await client.post(ZHIPU_API_URL, json=payload, headers=headers)
 
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:400] if e.response is not None else ""
-            return {"success": False, "error": f"API HTTP {e.response.status_code}: {body}"}
-        except httpx.TimeoutException:
-            return {"success": False, "error": "VL 调用超时 (timeout)"}
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"success": False, "error": f"调用失败: {str(e)}"}
+                if resp.status_code == 429:
+                    last_err = f"429 限流: {resp.text[:200]}"
+                    print(f"   ⏳ 429 限流，{delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
+                    continue
+
+                if resp.status_code == 400:
+                    try:
+                        body = resp.json()
+                        msg = (body.get("error") or {}).get("message", resp.text[:200])
+                    except Exception:
+                        msg = resp.text[:200]
+                    return {"success": False, "error": f"400: {msg}"}
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                if "error" in data:
+                    err = data["error"]
+                    if isinstance(err, dict):
+                        err = err.get("message", str(err))
+                    return {"success": False, "error": f"API 报错: {err}"}
+
+                choices = data.get("choices")
+                if not choices:
+                    return {"success": False, "error": f"返回异常: {str(data)[:200]}"}
+
+                msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+                if not msg:
+                    return {"success": False, "error": f"返回异常: {str(data)[:200]}"}
+
+                raw = msg.get("content", "")
+                if isinstance(raw, list):
+                    raw = " ".join(
+                        p.get("text", "") for p in raw
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                raw = _strip_fence(str(raw))
+
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"success": False, "error": f"非 JSON: {raw[:300]}"}
+
+                if not isinstance(parsed, dict):
+                    return {"success": False, "error": "返回非对象"}
+
+                return {"success": True, "data": parsed}
+
+            except httpx.HTTPStatusError as e:
+                body = e.response.text[:300] if e.response is not None else ""
+                return {"success": False, "error": f"HTTP {e.response.status_code}: {body}"}
+            except httpx.TimeoutException:
+                last_err = "VL 调用超时"
+                print(f"   ⏳ 超时，{delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+                continue
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return {"success": False, "error": f"调用失败: {e}"}
+
+    return {"success": False, "error": f"重试 {max_retries} 次仍失败: {last_err}"}
 
 
-# ==================== 标注图 ====================
-
-def _annotate_image(
-    pil_img: Image.Image,
-    vl_items: List[Dict[str, Any]],
-    min_conf: float = 0.45,
-    max_constellations: int = 6,
+def _build_cluster_prompt(
+    cluster: Dict[str, Any],
+    all_clusters: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
-    在照片上标注 VL 识别出的星点 + 星座标签：
-      · 每个星座画出它标出的星点（圆点）
-      · 在星点几何中心写星座名
-      · 不画骨架连线（避免一根线错全盘崩）
-      · 只画 confidence >= min_conf 的星座
-      · 若某星座标出的星点不足 2 颗，则退化为在九宫格中心位置标一个标签
+    整图 prompt：把全部簇的信息拼成一份。
+    参数 cluster 保留兼容签名；实际使用 all_clusters（若提供）。
     """
-    from PIL import ImageDraw, ImageFont
+    clusters = all_clusters if all_clusters else [cluster]
+    k = len(clusters)
 
-    img = pil_img.convert("RGB").copy()
-    draw = ImageDraw.Draw(img, "RGBA")
-    w, h = img.size
+    color_rows = []
+    for c in clusters:
+        rgb = _CLUSTER_PALETTE[c["id"] % len(_CLUSTER_PALETTE)]
+        color_rows.append(
+            f"  - C{c['id']}：RGB{rgb}（成员 {c['star_count']} 颗）"
+        )
+    cluster_table = "\n".join(color_rows)
 
-    try:
-        font_size = max(18, int(min(w, h) * 0.028))
-        font = ImageFont.truetype("arial.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    details = []
+    for c in clusters:
+        rgb = _CLUSTER_PALETTE[c["id"] % len(_CLUSTER_PALETTE)]
+        main = c["main_star"]
+        members = c["stars"][:8]
 
-    star_radius = max(4, int(min(w, h) * 0.007))
+        member_lines = "\n".join(
+            f"      {i+1}. ({m['px']:.0f},{m['py']:.0f}) "
+            f"亮度={m['brightness']:.1f} 权重={m['weight']:.3f} "
+            f"距主星={m['dist_to_main']:.1f}"
+            for i, m in enumerate(members)
+        ) or "      （无）"
 
-    drawn = 0
-    for item in vl_items or []:
+        edge_lines = "\n".join(
+            f"      ({e['px']:.0f},{e['py']:.0f}) 亮度={e['brightness']:.1f}"
+            for e in c.get("edge_stars", [])
+        ) or "      （无）"
+
+        neighbor_lines = ", ".join(
+            f"C{n['cluster_id']}({n['distance']:.0f}px)"
+            for n in c.get("neighbors", [])[:3]
+        ) or "（无）"
+
+        details.append(f"""
+  ── C{c['id']}（颜色 RGB{rgb}）──
+    成员数：{c['star_count']}
+    主星：像素({main['px']:.0f},{main['py']:.0f}) 亮度={main['brightness']:.1f}
+    平均亮度：{c['avg_brightness']}
+    bbox：x[{c['bbox']['x0']:.0f},{c['bbox']['x1']:.0f}] y[{c['bbox']['y0']:.0f},{c['bbox']['y1']:.0f}]
+    成员星（按权重降序）：
+{member_lines}
+    边缘星：
+{edge_lines}
+    邻近簇：{neighbor_lines}
+""")
+
+    cluster_details = "\n".join(details)
+
+    return FULL_IMAGE_VL_PROMPT.format(
+        k=k,
+        k_minus_1=k - 1,
+        cluster_table=cluster_table,
+        cluster_details=cluster_details,
+    )
+
+
+async def _identify_clusters_vl(
+    pil: Image.Image,
+    clusters: List[Dict[str, Any]],
+    base_versions: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """整图一次调用，返回 {"success": bool, "by_id": {...}, "summary": ..., "raw": ...}"""
+    if not ZHIPU_API_KEY:
+        for c in clusters:
+            c["vl_result"] = {"success": False, "error": "未配置 VL API Key"}
+        return {"success": False, "error": "未配置 VL API Key"}
+
+    # 整图标注（所有簇一起）
+    annotated = _annotate_cluster_for_vl(pil, clusters[0], clusters)
+    images = list(base_versions) + [
+        {"b64": annotated, "mime": "image/png", "label": "聚类标注图"},
+    ]
+    prompt = _build_cluster_prompt(clusters[0], clusters)
+
+    print(f"🤖 VL 整图调用：{len(clusters)} 个簇，{len(images)} 张图 ...")
+    res = await _call_vl_for_cluster(images, prompt)
+
+    if not res.get("success"):
+        for c in clusters:
+            c["vl_result"] = {"success": False,
+                              "error": res.get("error", "整图调用失败")}
+        return res
+
+    data = res["data"]
+    parsed_clusters = data.get("clusters") if isinstance(data, dict) else None
+    if not isinstance(parsed_clusters, list):
+        for c in clusters:
+            c["vl_result"] = {"success": False, "error": "返回缺少 clusters 字段"}
+        return {"success": False, "error": "返回缺少 clusters 字段"}
+
+    by_id: Dict[int, Dict[str, Any]] = {}
+    for item in parsed_clusters:
         if not isinstance(item, dict):
             continue
         try:
-            conf = float(item.get("confidence", 0))
+            cid = int(item.get("id", -1))
+        except (TypeError, ValueError):
+            continue
+
+        abbr = _norm_constellation(
+            item.get("constellation_abbr") or item.get("constellation") or ""
+        )
+        full = _ABBR_TO_FULL.get(abbr, abbr) if abbr else ""
+        try:
+            conf = round(max(0.0, min(1.0, float(item.get("confidence", 0.0)))), 3)
         except (TypeError, ValueError):
             conf = 0.0
-        if conf < min_conf:
-            continue
 
-        abbr = _norm(item.get("name", ""))
-        if not abbr:
-            continue
+        alts = item.get("alternative")
+        clean_alts = []
+        if isinstance(alts, list):
+            for a in alts[:4]:
+                if not isinstance(a, dict):
+                    continue
+                a_abbr = _norm_constellation(a.get("name") or "")
+                try:
+                    a_conf = float(a.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    a_conf = 0.0
+                clean_alts.append({
+                    "name": _ABBR_TO_FULL.get(a_abbr, a_abbr) or str(a.get("name") or ""),
+                    "abbr": a_abbr,
+                    "confidence": round(max(0.0, min(1.0, a_conf)), 3),
+                    "reason": str(a.get("reason") or "").strip(),
+                })
 
-        stars = _clean_vl_stars(item.get("stars"))
+        by_id[cid] = {
+            "success": True,
+            "constellation": full or str(item.get("constellation") or ""),
+            "constellation_abbr": abbr,
+            "constellation_full": full,
+            "confidence": conf,
+            "reason": str(item.get("reason") or "").strip(),
+            "alternative": clean_alts,
+            "shape_description": str(item.get("shape_description") or "").strip(),
+            "edge_note": str(item.get("edge_note") or "").strip(),
+        }
 
-        # ---- 收集像素坐标 ----
-        pts: List[tuple] = []
+    for c in clusters:
+        c["vl_result"] = by_id.get(c["id"], {
+            "success": False,
+            "error": "VL 未返回该簇的判断",
+        })
+
+    return {
+        "success": True,
+        "by_id": by_id,
+        "summary": str(data.get("summary") or "").strip(),
+        "sky_region": str(data.get("sky_region") or "").strip(),
+        "raw": data,
+    }
+
+
+# ==================== 前端展示标注 ====================
+
+def _annotate(
+    pil: Image.Image,
+    stars: List[Dict[str, Any]],
+    clusters: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    img = pil.convert("RGB").copy()
+    draw = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+
+    r_base = max(3.0, min(w, h) * 0.006)
+    r_min = r_base * 0.6
+    r_max = r_base * 1.9
+
+    fluxes = [max(float(s.get("brightness", 0.0)), 1e-6) for s in stars]
+    if fluxes:
+        log_vals = np.log(fluxes)
+        lo, hi = float(log_vals.min()), float(log_vals.max())
+        span = hi - lo
+        for s, lv in zip(stars, log_vals):
+            t = 0.0 if span < 1e-9 else (lv - lo) / span
+            s["_r"] = r_min + t * (r_max - r_min)
+    else:
         for s in stars:
-            pts.append((s["x"] * w, s["y"] * h))
+            s["_r"] = r_base
 
-        # ---- 若星点不足，用九宫格中心作为标签位置 ----
-        if len(pts) < 2:
-            pos = _clean_position(item.get("position"))
-            x1, y1, x2, y2 = _POSITION_TO_BOX.get(pos, _POSITION_TO_BOX["不确定"])
-            cx = (x1 + x2) / 2 * w
-            cy = (y1 + y2) / 2 * h
+    use_cluster_color = bool(clusters) and len(clusters) > 1
+
+    for s in stars:
+        px, py = float(s["px"]), float(s["py"])
+        r = float(s["_r"])
+        if use_cluster_color:
+            cid = int(s.get("cluster", 0))
+            color = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
         else:
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
+            color = (255, 0, 0)
 
-        # ---- 画星点 ----
-        for (px, py) in pts:
-            draw.ellipse(
-                [px - star_radius, py - star_radius,
-                 px + star_radius, py + star_radius],
-                fill=(255, 255, 0, 255),
-                outline=(255, 120, 0, 255),
-                width=2,
-            )
-
-        # ---- 写星座名（英文全名 + 置信度）----
-        label = _ABBR_TO_FULL.get(abbr, abbr)
-        label = f"{label}  {conf:.0%}"
-
-        try:
-            left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
-            tw = right - left
-            th = bottom - top
-        except Exception:
-            tw, th = draw.textsize(label, font=font)
-
-        tx = cx - tw / 2
-        ty = cy - th / 2
-
-        draw.rectangle(
-            [tx - 8, ty - 5, tx + tw + 8, ty + th + 5],
-            fill=(0, 0, 0, 200),
+        draw.ellipse(
+            [px - r * 2.2, py - r * 2.2, px + r * 2.2, py + r * 2.2],
+            fill=(color[0], color[1], color[2], 60),
         )
-        draw.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
-
-        drawn += 1
-        if drawn >= max_constellations:
-            break
+        draw.ellipse(
+            [px - r, py - r, px + r, py + r],
+            fill=(color[0], color[1], color[2], 255),
+            outline=(max(0, color[0] - 100), max(0, color[1] - 60),
+                     max(0, color[2] - 60), 255),
+            width=1,
+        )
+        s.pop("_r", None)
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=False)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+def _annotate_constellation_positions(
+    pil: Image.Image,
+    clusters: List[Dict[str, Any]],
+) -> str:
+    """
+    生成“星座位置标注图”：
+      · 每个簇用其调色板颜色高亮，主星画大圈 + 白心
+      · 每个主星旁边标注 C{id} + 星座名 + 缩写 + 置信度
+    返回 base64 PNG。
+    """
+    img = pil.convert("RGB").copy()
+    draw = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    r_base = max(4.0, min(w, h) * 0.007)
+    font_label = _load_font(max(18, int(min(w, h) * 0.024)))
+    font_sub = _load_font(max(13, int(min(w, h) * 0.017)))
 
-# ==================== 后端校验 ====================
+    for c in clusters:
+        cid = c["id"]
+        color = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
+        main = c["main_star"]
+        mx, my = float(main["px"]), float(main["py"])
 
-def _verify(vl_items: List[Dict[str, Any]], hyg_stars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for item in vl_items or []:
-        if not isinstance(item, dict):
-            continue
-        abbr = _norm(item.get("name", ""))
-        if not abbr:
-            continue
-        conf = _clamp(item.get("confidence", 0.5))
-        position = _clean_position(item.get("position"))
+        # 簇成员：半透明小实心点
+        for s in c["stars"]:
+            px, py = float(s["px"]), float(s["py"])
+            r = r_base * 0.6
+            draw.ellipse(
+                [px - r, py - r, px + r, py + r],
+                fill=(color[0], color[1], color[2], 185),
+            )
 
-        constellation_records = [
-            s for s in hyg_stars
-            if _star_constellation(s) == abbr
-        ]
+        # 主星：大圈 + 白心
+        R = r_base * 2.4
+        draw.ellipse(
+            [mx - R, my - R, mx + R, my + R],
+            outline=(color[0], color[1], color[2], 255),
+            width=max(2, int(r_base * 0.9)),
+        )
+        draw.ellipse(
+            [mx - r_base * 0.55, my - r_base * 0.55,
+             mx + r_base * 0.55, my + r_base * 0.55],
+            fill=(255, 255, 255, 255),
+        )
 
-        filtered: List[tuple] = []
-        for s in constellation_records:
-            mag = _star_mag(s)
-            if mag <= VERIFY_MAX_MAG:
-                filtered.append((mag, s))
-        filtered.sort(key=lambda x: x[0])
-
-        if filtered:
-            matched_stars = [s for _, s in filtered[:12]]
+        # ---- 读取 VL 结果 ----
+        vr = c.get("vl_result") or {}
+        if vr.get("success"):
+            name = (vr.get("constellation_full")
+                    or vr.get("constellation")
+                    or vr.get("constellation_abbr") or "")
+            abbr = vr.get("constellation_abbr") or ""
+            try:
+                conf = float(vr.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                conf = 0.0
+            line1 = f"C{cid}: {name}"
+            line2 = f"({abbr} {conf:.2f})" if abbr else f"({conf:.2f})"
         else:
-            all_records = [(_star_mag(s), s) for s in constellation_records]
-            all_records.sort(key=lambda x: x[0])
-            matched_stars = [s for _, s in all_records[:12]]
+            line1 = f"C{cid}: ?"
+            line2 = "VL 未判定"
 
-        if not matched_stars:
-            continue
+        # ---- 标签框大小 ----
+        try:
+            l1, t1, r1, b1 = draw.textbbox((0, 0), line1, font=font_label)
+            l2, t2, r2, b2 = draw.textbbox((0, 0), line2, font=font_sub)
+            tw1, th1 = r1 - l1, b1 - t1
+            tw2, th2 = r2 - l2, b2 - t2
+        except Exception:
+            tw1, th1, tw2, th2 = 120, 22, 80, 16
 
-        skeleton_stars = _select_skeleton_stars(matched_stars, limit=8)
+        box_w = max(tw1, tw2) + 16
+        box_h = th1 + th2 + 12
 
-        out.append({
-            "abbr": abbr,
-            "full": _ABBR_TO_FULL.get(abbr, abbr),
-            "confidence": round(conf, 3),
-            "position": position,
-            "stars": _clean_vl_stars(item.get("stars")),
-            "reason": str(item.get("reason", "")),
-            "bright_stars": _clean_bright_stars(item.get("bright_stars")),
-            "matched_stars": skeleton_stars,
-            "skeleton_stars": skeleton_stars,
-            "star_count": len(skeleton_stars),
-            "raw_star_count": len(matched_stars),
-        })
-    out.sort(key=lambda x: -x["confidence"])
-    return out
+        tx = mx + R + 8
+        ty = my - box_h // 2
+        if tx + box_w > w - 2:
+            tx = mx - R - box_w - 8
+        if tx < 2:
+            tx = 2
+        if ty < 2:
+            ty = 2
+        if ty + box_h > h - 2:
+            ty = h - box_h - 2
 
+        draw.rectangle(
+            [tx - 4, ty - 3, tx + box_w, ty + box_h],
+            fill=(0, 0, 0, 205),
+            outline=(color[0], color[1], color[2], 255),
+            width=2,
+        )
+        draw.text(
+            (tx + 3, ty + 1), line1, font=font_label,
+            fill=(color[0], color[1], color[2], 255),
+        )
+        draw.text(
+            (tx + 3, ty + th1 + 5), line2, font=font_sub,
+            fill=(235, 235, 235, 255),
+        )
+
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=False)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 # ==================== 识别端点 ====================
 
-@app.get("/api/vision/vl-status")
-async def vl_status():
+@app.get("/api/vision/status")
+async def vision_status():
     return {
+        "engine": "opencv-local+kmeans(K=6)+vl",
         "configured": bool(ZHIPU_API_KEY),
         "model": VL_MODEL,
-        "hint": "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"
-        if not ZHIPU_API_KEY
-        else "已就绪",
-        "min_conf_draw": MIN_CONF_DRAW,
+        "hint": (
+            "已就绪" if ZHIPU_API_KEY
+            else "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"
+        ),
+        "top_n_default": TOP_N,
+        "max_dim": MAX_DIM,
+        "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+        "edge_margin": EDGE_MARGIN_RATIO,
+        "forced_k": FORCED_K,
+        "min_stars_per_cluster": CLUSTER_MIN_STARS_PER_CLUSTER,
+        "weight_brightness": WEIGHT_BRIGHTNESS,
+        "weight_distance": WEIGHT_DISTANCE,
     }
 
 
-@app.post("/api/vision/vl-identify")
-async def vl_identify(file: UploadFile = File(...)):
-    if not loader.loaded:
-        try:
-            load_result = loader.load_data()
-            if not load_result.get("success"):
-                return {"success": False, "message": "请先加载 HYG 星表数据"}
-        except Exception:
-            return {"success": False, "message": "请先加载 HYG 星表数据"}
+@app.get("/api/vision/vl-status")
+async def vl_status_compat():
+    return await vision_status()
 
-    if not ZHIPU_API_KEY:
-        return {"success": False, "message": "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY"}
 
+async def _handle_brightest(
+    file: UploadFile,
+    top_n: int,
+    forced_k: Optional[int] = None,
+    vl_k: Optional[int] = None,
+) -> Dict[str, Any]:
+    # ---- 读取上传 ----
     try:
-        img_bytes = await file.read()
-        if not img_bytes:
-            return {"success": False, "message": "图片为空"}
-        if len(img_bytes) > 15 * 1024 * 1024:
-            return {"success": False, "message": "图片过大（>15MB）"}
+        data = await file.read()
+    except Exception as e:
+        return {"success": False, "identifiable": False,
+                "message": f"读取上传文件失败: {e}"}
 
+    print(f"📥 上传: {file.filename!r} size={len(data)}")
+
+    if not data:
+        return {"success": False, "identifiable": False, "message": "图片为空"}
+    if len(data) > MAX_UPLOAD_BYTES:
+        return {"success": False, "identifiable": False,
+                "message": f"图片过大（>{MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+
+    # ---- 检测 ----
+    try:
+        result = _detect_brightest_stars(data, max_dim=MAX_DIM, top_n=top_n)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"success": False, "identifiable": False,
+                "message": f"图像处理失败: {e}"}
+
+    stars = result.get("stars", [])
+    pil = result["pil"]
+    w, h = result.get("size", pil.size)
+    print(f"🔎 候选 {result.get('candidate_count', 0)} 个, "
+          f"保留 {len(stars)} 颗")
+
+    # ---- 聚类：强制 K=6 ----
+    cluster_results: List[Dict[str, Any]] = []
+    if len(stars) >= FORCED_K * CLUSTER_MIN_STARS_PER_CLUSTER:
         try:
-            imgs = _prepare_two_versions(img_bytes, max_dim=1280)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"success": False, "message": f"读取图片失败: {e}"}
-
-        vl_images = [
-            {"b64": imgs["original_b64"], "mime": imgs["original_mime"]},
-            {"b64": imgs["adapted_b64"], "mime": imgs["adapted_mime"]},
-        ]
-
-        vl = await _call_vl(vl_images, VL_PROMPT)
-
-        if not vl["success"]:
-            return {
-                "success": False,
-                "message": vl.get("error"),
-                "raw_content": vl.get("raw_content"),
-                "annotated_image": "",
-                "annotated_mime": "image/png",
-            }
-
-        feat = vl["data"]
-        if not isinstance(feat, dict):
-            return {
-                "success": False,
-                "message": "模型返回格式异常",
-                "raw_content": str(feat)[:500],
-                "annotated_image": "",
-                "annotated_mime": "image/png",
-            }
-
-        visible = bool(feat.get("visible", True))
-        image_description = str(feat.get("image_description", ""))
-        pattern_description = str(feat.get("pattern_description", ""))
-        estimated_season = _normalize_season(feat.get("estimated_season", ""))
-        vl_items = feat.get("constellations") or []
-        note = str(feat.get("note", ""))
-
-        print(
-            f"[vl] visible={visible}, season={estimated_season}, "
-            f"items={[(i.get('name'), i.get('confidence')) for i in vl_items]}"
-        )
-        print(f"[vl] image_description: {image_description}")
-        print(f"[vl] pattern: {pattern_description}")
-        print(f"[vl] note: {note}")
-
-        if not visible or not vl_items:
-            return {
-                "success": True,
-                "cross_check_passed": False,
-                "vl_visible": False,
-                "vl_constellations": [],
-                "matched_stars": [],
-                "matched_count": 0,
-                "final_confidence": 0.0,
-                "estimated_season": estimated_season,
-                "vl_season": estimated_season,
-                "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
-                "image_description": image_description,
-                "vl_pattern_description": pattern_description or image_description or note,
-                "vl_note": note,
-                "raw_vl_features": feat,
-                "annotated_image": "",
-                "annotated_mime": "image/png",
-                "message": f"未能识别出足够可信的结果：{note}".strip("："),
-            }
-
-        try:
-            hyg_stars = loader.get_stars(max_mag=VERIFY_MAX_MAG)
+            cluster_results = _cluster_stars_all(stars, forced_k=FORCED_K)
+            if cluster_results:
+                print(f"🧩 聚类: K=[{cluster_results[0]['k']}]")
+            else:
+                print(f"🧩 K={FORCED_K} 不满足每簇最少 {CLUSTER_MIN_STARS_PER_CLUSTER} 颗，无有效聚类")
         except Exception:
-            hyg_stars = loader.get_bright_stars(max_mag=VERIFY_MAX_MAG)
+            import traceback; traceback.print_exc()
 
-        verified = _verify(vl_items, hyg_stars)
-
-        annotated_image = ""
-        try:
-            annotate_source = imgs.get("original_pil")
-            if annotate_source is None:
-                annotate_source = Image.open(BytesIO(img_bytes)).convert("RGB")
-            annotated_image = _annotate_image(
-                annotate_source, vl_items, min_conf=MIN_CONF_DRAW
-            )
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            annotated_image = ""
-
-        if not verified:
-            return {
-                "success": True,
-                "cross_check_passed": False,
-                "vl_visible": True,
-                "vl_constellations": [],
-                "matched_stars": [],
-                "matched_count": 0,
-                "final_confidence": 0.0,
-                "estimated_season": estimated_season,
-                "vl_season": estimated_season,
-                "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
-                "image_description": image_description,
-                "vl_pattern_description": pattern_description or image_description or note,
-                "vl_note": note,
-                "raw_vl_features": feat,
-                "annotated_image": annotated_image,
-                "annotated_mime": "image/png",
-                "message": "模型给出了结果，但未能通过星表校验。",
-            }
-
-        top = verified[0]
+    if not cluster_results:
+        # 聚类失败 → 只返回星点，不生成任何标注图
         return {
             "success": True,
-            "cross_check_passed": top["confidence"] >= 0.5,
-            "vl_visible": True,
-            "vl_constellations": verified,
-            "matched_stars": top["matched_stars"],
-            "matched_count": len(top["matched_stars"]),
-            "estimated_season": estimated_season,
-            "vl_season": estimated_season,
-            "vl_season_zh": SEASON_ZH.get(estimated_season, ""),
-            "final_confidence": top["confidence"],
-            "image_description": image_description,
-            "vl_pattern_description": pattern_description or image_description or note,
-            "vl_note": note,
-            "raw_vl_features": feat,
-            "annotated_image": annotated_image,
+            "identifiable": len(stars) > 0,
+            "count": len(stars),
+            "stars": stars,
+            "clusters": [],
+            "all_cluster_results": [],
+            "vl_clusters": [],
+            "vl_summary": None,
+            "vl_sky_region": None,
+            "image_width": w,
+            "image_height": h,
+            "threshold": result.get("threshold"),
+            "candidate_count": result.get("candidate_count", 0),
+            "edge_margin": result.get("edge_margin"),
+            "roi": result.get("roi"),
+            "annotated_image": "",
             "annotated_mime": "image/png",
+            "source": "opencv-local+kmeans+vl",
+            "message": f"检测 {len(stars)} 颗星，但 K={FORCED_K} 聚类失败",
         }
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "message": f"识别失败: {e}"}
+    chosen_k_result = cluster_results[0]
+
+    # ---- 为 K=6 生成标注图 ----
+    try:
+        chosen_k_result["annotated_image"] = _annotate(
+            pil, chosen_k_result["stars"], chosen_k_result["clusters"]
+        )
+        chosen_k_result["annotated_mime"] = "image/png"
+    except Exception:
+        import traceback; traceback.print_exc()
+        chosen_k_result["annotated_image"] = ""
+        chosen_k_result["annotated_mime"] = None
+
+    # ---- 整图一次调用 VL ----
+    vl_summary = None
+    if ZHIPU_API_KEY:
+        print(f"🤖 VL 整图判断：K={FORCED_K}，共 {len(chosen_k_result['clusters'])} 个簇")
+        try:
+            base_versions = _prepare_versions(pil)
+            vl_summary = await _identify_clusters_vl(
+                pil, chosen_k_result["clusters"], base_versions
+            )
+            for c in chosen_k_result["clusters"]:
+                vr = c.get("vl_result") or {}
+                if vr.get("success"):
+                    print(f"   ✓ C{c['id']} → "
+                          f"{vr.get('constellation') or vr.get('constellation_abbr')} "
+                          f"({vr.get('confidence', 0):.2f})")
+                else:
+                    print(f"   ✗ C{c['id']} → {vr.get('error')}")
+        except Exception:
+            import traceback; traceback.print_exc()
+    else:
+        for c in chosen_k_result["clusters"]:
+            c["vl_result"] = {"success": False, "error": "未配置 VL API Key"}
+
+    # ---- 让 stars[i].cluster 对应 K=6 的分配 ----
+    if len(chosen_k_result.get("stars", [])) == len(stars):
+        for orig, marked in zip(stars, chosen_k_result["stars"]):
+            orig["cluster"] = int(marked.get("cluster", -1))
+
+    # ---- 调试图 ----
+    if DEBUG_VISION:
+        try:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # 1) 输入图（预处理后）
+            pil.save(_DEBUG_DIR / f"{ts}_input.png")
+
+            # 2) 簇颜色标注图
+            if chosen_k_result.get("annotated_image"):
+                (_DEBUG_DIR / f"{ts}_k{FORCED_K}_clusters.png").write_bytes(
+                    base64.b64decode(chosen_k_result["annotated_image"])
+                )
+
+            # 3) 星座位置标注图（含 VL 判定结果）
+            try:
+                const_b64 = _annotate_constellation_positions(
+                    pil, chosen_k_result["clusters"]
+                )
+                (_DEBUG_DIR
+                 / f"{ts}_k{FORCED_K}_constellations.png").write_bytes(
+                    base64.b64decode(const_b64)
+                )
+                # 也挂回结果，前端有需要可直接取
+                chosen_k_result["constellation_annotated_image"] = const_b64
+                print(f"💾 星座位置标注图已保存: "
+                      f"{ts}_k{FORCED_K}_constellations.png")
+            except Exception as e:
+                print(f"⚠️ 生成星座位置标注图失败: {e}")
+
+            print(f"💾 调试图: {ts}_*.png")
+        except Exception as e:
+            print(f"⚠️ 保存调试图失败: {e}")
+
+    # ---- 消息 ----
+    identifiable = len(stars) > 0
+    vl_ok = sum(
+        1 for c in chosen_k_result["clusters"]
+        if (c.get("vl_result") or {}).get("success")
+    )
+    if vl_ok:
+        msg = (f"检测 {len(stars)} 颗星，K={FORCED_K}；"
+               f"VL 成功判断 {vl_ok}/{len(chosen_k_result['clusters'])} 簇")
+    else:
+        msg = f"检测 {len(stars)} 颗星，K={FORCED_K}；VL 未返回有效结果"
+
+    # ---- 返回 ----
+    all_results = [{
+        "k": chosen_k_result["k"],
+        "score": chosen_k_result["score"],
+        "cluster_count": len(chosen_k_result["clusters"]),
+        "clusters": chosen_k_result["clusters"],
+        "annotated_image": chosen_k_result.get("annotated_image", ""),
+        "annotated_mime": "image/png",
+        "used_for_vl": True,
+    }]
+
+    return {
+        "success": True,
+        "identifiable": identifiable,
+
+        "count": len(stars),
+        "matched_count": len(stars),
+        "detected_star_count": len(stars),
+        "stars": stars,
+        "detected_stars": [{"x": s["x"], "y": s["y"]} for s in stars],
+
+        # K=6 的聚类（同时作为顶层字段，方便前端读取）
+        "clusters": chosen_k_result["clusters"],
+        "cluster_k": FORCED_K,
+        "cluster_score": chosen_k_result["score"],
+
+        # 全部 K（现在只有 6）
+        "all_cluster_results": all_results,
+
+        # VL 结果
+        "vl_cluster_k": FORCED_K,
+        "vl_clusters": chosen_k_result["clusters"],
+        "vl_summary": vl_summary.get("summary") if vl_summary else None,
+        "vl_sky_region": vl_summary.get("sky_region") if vl_summary else None,
+
+        # 图像信息
+        "image_width": w,
+        "image_height": h,
+        "threshold": result.get("threshold"),
+        "candidate_count": result.get("candidate_count", 0),
+        "edge_margin": result.get("edge_margin"),
+        "roi": result.get("roi"),
+
+        # 标注图（K=6）
+        "annotated_image": chosen_k_result.get("annotated_image", ""),
+        "annotated_mime": "image/png",
+
+        "source": "opencv-local+kmeans+vl",
+        "message": msg,
+    }
 
 
-# 兼容别名
+@app.post("/api/vision/brightest-stars")
+async def brightest_stars(
+    file: UploadFile = File(...),
+    top_n: int = Query(default=TOP_N, ge=1, le=200),
+    cluster_k: Optional[int] = Query(default=FORCED_K, ge=2, le=10),
+    vl_k: Optional[int] = Query(default=FORCED_K, ge=2, le=10),
+):
+    return await _handle_brightest(
+        file, top_n, forced_k=FORCED_K, vl_k=FORCED_K
+    )
+
+
 @app.post("/api/vision/identify")
 async def identify(file: UploadFile = File(...)):
-    return await vl_identify(file)
+    return await _handle_brightest(
+        file, TOP_N, forced_k=FORCED_K, vl_k=FORCED_K
+    )
+
+
+@app.post("/api/vision/vl-identify")
+async def vl_identify_compat(file: UploadFile = File(...)):
+    return await _handle_brightest(
+        file, TOP_N, forced_k=FORCED_K, vl_k=FORCED_K
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
-    if not ZHIPU_API_KEY:
-        print("⚠️ 未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY")
+
+    print(f"🔭 识星引擎: OpenCV + K-means (强制 K={FORCED_K}) + VL 整图调用")
+    print(f"📁 debug: {_DEBUG_DIR}  (DEBUG_VISION={DEBUG_VISION})")
+    print(f"🖼  边缘遮罩: {EDGE_MARGIN_RATIO:.0%}")
+    print(f"🧩 聚类: 强制 K={FORCED_K}，每簇至少 {CLUSTER_MIN_STARS_PER_CLUSTER} 颗")
+    if ZHIPU_API_KEY:
+        print(f"🤖 VL: {VL_MODEL}  Key={ZHIPU_API_KEY[:6]}...")
     else:
-        print(f"✅ API Key: {ZHIPU_API_KEY[:6]}...")
-        print(f"✅ 模型: {VL_MODEL}")
-        print(f"📁 debug: {_DEBUG_DIR}")
+        print("⚠️  未配置 VL API Key，将只输出聚类结果")
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
