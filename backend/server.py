@@ -89,6 +89,7 @@ VL_MODEL = os.getenv(
 # 主星权重系数（亮度 + 距主星距离）
 WEIGHT_BRIGHTNESS = float(os.getenv("VISION_WEIGHT_BRIGHTNESS", "0.65"))
 WEIGHT_DISTANCE = float(os.getenv("VISION_WEIGHT_DISTANCE", "0.35"))
+CONFIDENCE_THRESHOLD = float(os.getenv("VISION_CONFIDENCE_THRESHOLD", "0.51"))
 
 
 # ==================== 88 星座对照表 ====================
@@ -416,6 +417,7 @@ def _build_cluster_payload(
             weight = WEIGHT_BRIGHTNESS * b_norm + WEIGHT_DISTANCE * d_norm
             enriched.append({
                 **m,
+                "cluster": cid,
                 "dist_to_main": round(d, 2),
                 "weight": round(float(weight), 4),
             })
@@ -472,11 +474,11 @@ def _build_cluster_payload(
         nbrs.sort(key=lambda x: x["distance"])
         c["neighbors"] = nbrs
 
-    clusters.sort(key=lambda c: -c["star_count"])
-    for new_id, c in enumerate(clusters):
-        c["id"] = new_id
-        for m in c["stars"]:
-            m["cluster"] = new_id
+    # clusters.sort(key=lambda c: -c["star_count"])
+    # for new_id, c in enumerate(clusters):
+    #     c["id"] = new_id
+    #     for m in c["stars"]:
+    #         m["cluster"] = new_id
     return clusters
 
 
@@ -715,6 +717,7 @@ FULL_IMAGE_VL_PROMPT = """你是一名天文识星专家。这是同一张星空
 5. 所有簇的最终判定必须构成一片**天球上物理自洽的连续区域**；
    若不满足，请回到第 2 条重新调整最低置信度的簇。
 
+
 【输出格式】只输出 JSON，不要 markdown，不要解释：
 {{
   "clusters": [
@@ -796,6 +799,110 @@ FULL_IMAGE_VL_PROMPT = """你是一名天文识星专家。这是同一张星空
 }}
 """
 
+RECHECK_VL_PROMPT = """你是一名天文识星专家。这是同一张星空照片的 3 个版本（原图 / 提亮图 / 反相图）。
+
+照片中已经用【{k} 种不同颜色】的圆点标出了 {k} 个星群（cluster），每簇的**主星**用【大圆圈 + 中心白点】标出，旁边有小标签 C0~C{k_minus_1}。
+
+【颜色 → 簇 对照表】
+{cluster_table}
+
+【已高置信度确认的星座（锚点，不可更改；新判定必须与它们在天球上相邻/相接）】
+{confirmed_clusters}
+
+【需要重新判断的低置信度簇（置信度 < {threshold}）】
+{low_conf_clusters}
+
+【任务】
+只对上面列出的**低置信度簇**重新判定星座。**必须以所有高置信度簇的星座位置作为锚点**：
+1. 新判定的星座必须与相邻的高置信度锚点在**天球上物理相邻、相接或属于同一片天区**；
+2. 若低置信度簇与某个高置信度锚点判出的星座在天球上完全不相邻（例如锚点是 Orion，低置信簇却判 Cygnus），
+   必须改成与锚点相邻的星座（例如 Orion ↔ Taurus / Gemini / Monoceros / Lepus / Eridanus）；
+3. 若多个低置信度簇与高置信度锚点构成一片连续天区（夏季大三角、天蝎-人马区域等），
+   整体 sky_region / summary 必须与这些星座一致；
+4. **只输出需要修改的簇**（即上面列出的低置信度簇）；已经被高置信度确认的簇不要再返回。
+
+【判断要点】
+1. 每簇主星（大圆圈白心）权重最高，是形状锚点
+2. 越亮、离主星越近的成员星越可信
+3. 边缘星可能属于邻近簇，不要强行纳入当前星座形状
+4. 注意图像上的颜色和 C 编号，严格对齐 JSON 里的 id
+5. 优先选择与已确认锚点星座相邻的星座
+
+【最终裁决规则】
+1. 每簇只给一个最终答案（constellation / constellation_abbr），不要模糊两可
+2. confidence 为最终置信度（0~1），必须 ≥ 0.5（若仍 < 0.5，请在 reason 里说明不确定点）
+3. alternative 按置信度降序给出前 1~3 个候选
+
+【输出格式】只输出 JSON，不要 markdown，不要解释：
+{{
+  "clusters": [
+    {{
+      "id": 2,
+      "constellation": "Taurus",
+      "constellation_abbr": "Tau",
+      "confidence": 0.72,
+      "reason": "以已确认的 Orion 为锚点，本簇在图像上位于 Orion 西北侧，V 形毕星团结构清晰，与 Orion / Auriga 在天球上相邻",
+      "alternative": [
+        {{"name": "Auriga", "confidence": 0.25, "reason": "V 形也可联想五车二附近，但缺少御夫五边形"}}
+      ],
+      "shape_description": "V 形毕星团 + 牛角尖指向西北",
+      "edge_note": "西北侧一串密集小星可能是昴星团（M45），仍属金牛座"
+    }}
+  ],
+  "summary": "整张照片覆盖猎户座经金牛座至御夫座一带的冬季天区",
+  "sky_region": "冬季大三角 / 冬季六边形区域"
+}}
+"""
+
+def _parse_vl_item(item: Dict[str, Any]):
+    """把 VL 返回的单条 cluster 解析成 (id, parsed_dict)，解析失败返回 None。"""
+    if not isinstance(item, dict):
+        return None
+    try:
+        cid = int(item.get("id", -1))
+    except (TypeError, ValueError):
+        return None
+    if cid < 0:
+        return None
+
+    abbr = _norm_constellation(
+        item.get("constellation_abbr") or item.get("constellation") or ""
+    )
+    full = _ABBR_TO_FULL.get(abbr, abbr) if abbr else ""
+    try:
+        conf = round(max(0.0, min(1.0, float(item.get("confidence", 0.0)))), 3)
+    except (TypeError, ValueError):
+        conf = 0.0
+
+    alts = item.get("alternative")
+    clean_alts = []
+    if isinstance(alts, list):
+        for a in alts[:4]:
+            if not isinstance(a, dict):
+                continue
+            a_abbr = _norm_constellation(a.get("name") or "")
+            try:
+                a_conf = float(a.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                a_conf = 0.0
+            clean_alts.append({
+                "name": _ABBR_TO_FULL.get(a_abbr, a_abbr) or str(a.get("name") or ""),
+                "abbr": a_abbr,
+                "confidence": round(max(0.0, min(1.0, a_conf)), 3),
+                "reason": str(a.get("reason") or "").strip(),
+            })
+
+    return cid, {
+        "success": True,
+        "constellation": full or str(item.get("constellation") or ""),
+        "constellation_abbr": abbr,
+        "constellation_full": full,
+        "confidence": conf,
+        "reason": str(item.get("reason") or "").strip(),
+        "alternative": clean_alts,
+        "shape_description": str(item.get("shape_description") or "").strip(),
+        "edge_note": str(item.get("edge_note") or "").strip(),
+    }
 
 def _strip_fence(text: str) -> str:
     t = str(text).strip()
@@ -860,8 +967,31 @@ async def _call_vl_for_cluster(
                         msg = resp.text[:200]
                     return {"success": False, "error": f"400: {msg}"}
 
+                if resp.status_code in (500, 502, 503, 504):
+                    last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    print(f"   ⏳ 服务端错误，{delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
+                    continue
+
                 resp.raise_for_status()
-                data = resp.json()
+
+                txt = (resp.text or "").strip()
+
+                if not txt:
+                    last_err = f"HTTP {resp.status_code} 返回空内容"
+                    print(f"   ⏳ 空响应，{delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
+                    continue
+
+                try:
+                    data = json.loads(txt)
+                except json.JSONDecodeError:
+                    return {
+                        "success": False,
+                        "error": f"API 返回非 JSON(HTTP {resp.status_code}): {txt[:300]}"
+                    }
 
                 if "error" in data:
                     err = data["error"]
@@ -976,7 +1106,103 @@ def _build_cluster_prompt(
         cluster_details=cluster_details,
     )
 
+def _build_recheck_prompt(
+    all_clusters: List[Dict[str, Any]],
+    confirmed: List[tuple],
+    low_conf: List[Dict[str, Any]],
+    threshold: float = CONFIDENCE_THRESHOLD,
+) -> str:
+    """构造重新判断 prompt：只对低置信度簇重新判定，锚定高置信度簇。"""
+    k = len(all_clusters)
 
+    color_rows = []
+    for c in all_clusters:
+        rgb = _CLUSTER_PALETTE[c["id"] % len(_CLUSTER_PALETTE)]
+        color_rows.append(
+            f"  - C{c['id']}：RGB{rgb}（成员 {c['star_count']} 颗）"
+        )
+    cluster_table = "\n".join(color_rows)
+
+    # ---- 已确认锚点 ----
+    confirmed_rows = []
+    for c, vr in confirmed:
+        rgb = _CLUSTER_PALETTE[c["id"] % len(_CLUSTER_PALETTE)]
+        main = c["main_star"]
+        name = (vr.get("constellation_full")
+                or vr.get("constellation")
+                or vr.get("constellation_abbr") or "")
+        abbr = vr.get("constellation_abbr") or ""
+        try:
+            conf = float(vr.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        confirmed_rows.append(
+            f"  - C{c['id']}（RGB{rgb}）→ {name} ({abbr})，置信度 {conf:.2f}\n"
+            f"      主星像素：({main['px']:.0f},{main['py']:.0f})"
+        )
+    confirmed_text = "\n".join(confirmed_rows) or "（无）"
+
+    # ---- 低置信度簇详细信息 ----
+    low_details = []
+    for c in low_conf:
+        rgb = _CLUSTER_PALETTE[c["id"] % len(_CLUSTER_PALETTE)]
+        main = c["main_star"]
+        vr = c.get("vl_result") or {}
+
+        if vr.get("success"):
+            prev_name = (vr.get("constellation_full")
+                         or vr.get("constellation")
+                         or vr.get("constellation_abbr") or "")
+            try:
+                prev_conf = float(vr.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                prev_conf = 0.0
+        else:
+            prev_name = "（初次未判定）"
+            prev_conf = 0.0
+
+        members = c["stars"][:8]
+        member_lines = "\n".join(
+            f"      {i+1}. ({m['px']:.0f},{m['py']:.0f}) "
+            f"亮度={m['brightness']:.1f} 权重={m['weight']:.3f} "
+            f"距主星={m['dist_to_main']:.1f}"
+            for i, m in enumerate(members)
+        ) or "      （无）"
+
+        edge_lines = "\n".join(
+            f"      ({e['px']:.0f},{e['py']:.0f}) 亮度={e['brightness']:.1f}"
+            for e in c.get("edge_stars", [])
+        ) or "      （无）"
+
+        neighbor_lines = ", ".join(
+            f"C{n['cluster_id']}({n['distance']:.0f}px)"
+            for n in c.get("neighbors", [])[:3]
+        ) or "（无）"
+
+        low_details.append(f"""
+  ── C{c['id']}（颜色 RGB{rgb}）──
+    初次判定：{prev_name}（置信度 {prev_conf:.2f}，低于阈值 {threshold}）
+    成员数：{c['star_count']}
+    主星：像素({main['px']:.0f},{main['py']:.0f}) 亮度={main['brightness']:.1f}
+    平均亮度：{c['avg_brightness']}
+    bbox：x[{c['bbox']['x0']:.0f},{c['bbox']['x1']:.0f}] y[{c['bbox']['y0']:.0f},{c['bbox']['y1']:.0f}]
+    成员星（按权重降序）：
+{member_lines}
+    边缘星：
+{edge_lines}
+    邻近簇：{neighbor_lines}
+""")
+    low_text = "\n".join(low_details)
+
+    return RECHECK_VL_PROMPT.format(
+        k=k,
+        k_minus_1=k - 1,
+        cluster_table=cluster_table,
+        threshold=threshold,
+        confirmed_clusters=confirmed_text,
+        low_conf_clusters=low_text,
+    )
+    
 async def _identify_clusters_vl(
     pil: Image.Image,
     clusters: List[Dict[str, Any]],
@@ -1073,6 +1299,105 @@ async def _identify_clusters_vl(
         "raw": data,
     }
 
+async def _recheck_low_confidence_clusters(
+    pil: Image.Image,
+    clusters: List[Dict[str, Any]],
+    base_versions: List[Dict[str, str]],
+    threshold: float = CONFIDENCE_THRESHOLD,
+) -> Dict[str, Any]:
+    """
+    对置信度 < threshold 的簇重新调用 VL，以高置信度簇为锚点。
+    返回只包含需要修改的簇 id 与其新旧值。
+    """
+    if not ZHIPU_API_KEY:
+        return {"success": False, "error": "未配置 VL API Key"}
+
+    confirmed: List[tuple] = []
+    low_conf: List[Dict[str, Any]] = []
+    for c in clusters:
+        vr = c.get("vl_result") or {}
+        if not vr.get("success"):
+            low_conf.append(c)
+            continue
+        try:
+            conf = float(vr.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf >= threshold:
+            confirmed.append((c, vr))
+        else:
+            low_conf.append(c)
+
+    if not low_conf:
+        return {"success": True, "no_change": True,
+                "changed_ids": [], "changes": []}
+
+    if not confirmed:
+        return {"success": True, "no_change": True,
+                "changed_ids": [], "changes": [],
+                "skipped": "无高置信度锚点，跳过重新判断"}
+
+    prompt = _build_recheck_prompt(clusters, confirmed, low_conf, threshold)
+    annotated = _annotate_cluster_for_vl(pil, clusters[0], clusters)
+    images = list(base_versions) + [
+        {"b64": annotated, "mime": "image/png", "label": "聚类标注图"},
+    ]
+
+    print(f"🔁 VL 重新判断：低置信度 {len(low_conf)} 个"
+          f"（<{threshold}），锚点 {len(confirmed)} 个 ...")
+    res = await _call_vl_for_cluster(images, prompt)
+    if not res.get("success"):
+        return res
+
+    data = res["data"]
+    parsed = data.get("clusters") if isinstance(data, dict) else None
+    if not isinstance(parsed, list):
+        return {"success": False, "error": "重新判断返回缺少 clusters 字段"}
+
+    low_ids = {int(c["id"]) for c in low_conf}
+    updated: Dict[int, Dict[str, Any]] = {}
+    for item in parsed:
+        pr = _parse_vl_item(item)
+        if pr is None:
+            continue
+        cid, parsed_item = pr
+        if cid in low_ids:  # 只接受低置信度簇的修改
+            updated[cid] = parsed_item
+
+    changes: List[Dict[str, Any]] = []
+    for c in clusters:
+        if c["id"] not in updated:
+            continue
+        old = c.get("vl_result") or {}
+        new = updated[c["id"]]
+        c["vl_result"] = new
+        changes.append({
+            "id": c["id"],
+            "old": {
+                "constellation": old.get("constellation"),
+                "constellation_abbr": old.get("constellation_abbr"),
+                "confidence": old.get("confidence"),
+                "success": bool(old.get("success")),
+            },
+            "new": {
+                "constellation": new.get("constellation"),
+                "constellation_abbr": new.get("constellation_abbr"),
+                "confidence": new.get("confidence"),
+                "success": True,
+            },
+        })
+        print(f"   ↻ C{c['id']} "
+              f"{old.get('constellation_abbr') or old.get('constellation') or '?'}"
+              f"({old.get('confidence', 0)}) → "
+              f"{new.get('constellation_abbr')}({new.get('confidence')})")
+
+    return {
+        "success": True,
+        "changed_ids": [ch["id"] for ch in changes],
+        "changes": changes,
+        "summary": str(data.get("summary") or "").strip(),
+        "sky_region": str(data.get("sky_region") or "").strip(),
+    }
 
 # ==================== 前端展示标注 ====================
 
@@ -1253,6 +1578,7 @@ async def vision_status():
         "min_stars_per_cluster": CLUSTER_MIN_STARS_PER_CLUSTER,
         "weight_brightness": WEIGHT_BRIGHTNESS,
         "weight_distance": WEIGHT_DISTANCE,
+        "confidence_threshold": CONFIDENCE_THRESHOLD,  # 新增
     }
 
 
@@ -1347,6 +1673,9 @@ async def _handle_brightest(
 
     # ---- 整图一次调用 VL ----
     vl_summary = None
+    vl_summary = None
+    vl_recheck: Optional[Dict[str, Any]] = None
+
     if ZHIPU_API_KEY:
         print(f"🤖 VL 整图判断：K={FORCED_K}，共 {len(chosen_k_result['clusters'])} 个簇")
         try:
@@ -1362,6 +1691,23 @@ async def _handle_brightest(
                           f"({vr.get('confidence', 0):.2f})")
                 else:
                     print(f"   ✗ C{c['id']} → {vr.get('error')}")
+
+            # ---- 低置信度重新判断 ----
+            if vl_summary and vl_summary.get("success"):
+                try:
+                    vl_recheck = await _recheck_low_confidence_clusters(
+                        pil, chosen_k_result["clusters"], base_versions,
+                        threshold=CONFIDENCE_THRESHOLD,
+                    )
+                    if vl_recheck.get("success") and vl_recheck.get("changed_ids"):
+                        # 用重新判断的 summary / sky_region 覆盖（若返回）
+                        if vl_recheck.get("summary"):
+                            vl_summary["summary"] = vl_recheck["summary"]
+                        if vl_recheck.get("sky_region"):
+                            vl_summary["sky_region"] = vl_recheck["sky_region"]
+                        vl_summary["recheck"] = vl_recheck
+                except Exception:
+                    import traceback; traceback.print_exc()
         except Exception:
             import traceback; traceback.print_exc()
     else:
@@ -1448,12 +1794,25 @@ async def _handle_brightest(
 
         # 全部 K（现在只有 6）
         "all_cluster_results": all_results,
-
         # VL 结果
         "vl_cluster_k": FORCED_K,
         "vl_clusters": chosen_k_result["clusters"],
         "vl_summary": vl_summary.get("summary") if vl_summary else None,
         "vl_sky_region": vl_summary.get("sky_region") if vl_summary else None,
+
+        # 低置信度重新判断（只包含被修改的簇）
+        "vl_low_confidence_threshold": CONFIDENCE_THRESHOLD,
+        "vl_recheck": {
+            "performed": bool(
+                vl_recheck
+                and vl_recheck.get("success")
+                and not vl_recheck.get("no_change")
+            ),
+            "threshold": CONFIDENCE_THRESHOLD,
+            "changed_ids": vl_recheck.get("changed_ids", []) if vl_recheck else [],
+            "changes": vl_recheck.get("changes", []) if vl_recheck else [],
+            "skipped": vl_recheck.get("skipped") if vl_recheck else None,
+        } if vl_recheck else None,
 
         # 图像信息
         "image_width": w,

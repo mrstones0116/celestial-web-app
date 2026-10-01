@@ -900,6 +900,56 @@ class CelestialScene3D {
         this._flashHighlight(star);
     }
 
+    // ===== 照片识星：把视角平滑对准指定天球坐标（RA/Dec，单位：度） =====
+    /**
+     * 复用 focusOnStar 的 theta/phi 提取链，只是不再依赖一颗真实恒星。
+     * @param {number} raDeg   赤经（度，0~360；也接受 0~24 的小时值会被视作度数）
+     * @param {number} decDeg  赤纬（度，-90~90）
+     * @param {number} duration 动画时长（毫秒），默认 1000
+     * @returns {boolean} 是否成功调度视角动画
+     */
+    lookAtRaDec(raDeg, decDeg, duration = 1000) {
+        if (!this.camera || !this.horizonGroup) return false;
+        if (!isFinite(raDeg) || !isFinite(decDeg)) return false;
+
+        const ra  = (((raDeg % 360) + 360) % 360) * Math.PI / 180;
+        const dec = THREE.MathUtils.clamp(decDeg, -89.9, 89.9) * Math.PI / 180;
+
+        // 赤道单位向量 → 赤道场景坐标 (x, z, -y)，与 starLayers 里的映射一致
+        const ex = Math.cos(dec) * Math.cos(ra);
+        const ey = Math.cos(dec) * Math.sin(ra);
+        const ez = Math.sin(dec);
+        const e  = new THREE.Vector3(ex, ez, -ey);
+
+        // 赤道场景 → 地平场景（与 focusOnStar 走同一套 horizonGroup.matrix）
+        const w = e.applyMatrix4(this.horizonGroup.matrix);
+
+        const targetPhi   = Math.acos(THREE.MathUtils.clamp(w.y, -1, 1));
+        const targetTheta = Math.atan2(-w.z, w.x);
+
+        // 取最短角差，避免绕过 0/2π 边界
+        let dTheta = targetTheta - this.theta;
+        while (dTheta >  Math.PI) dTheta -= Math.PI * 2;
+        while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+
+        // 复用 animate() 里已有的补间（easeInOutQuad）
+        this._focusAnim = {
+            t0: performance.now(),
+            duration: Math.max(0, duration | 0),
+            fromTheta: this.theta,
+            dTheta,
+            fromPhi: this.phi,
+            toPhi: targetPhi
+        };
+        return true;
+    }
+
+    // ===== 别名：vision.js 会依次尝试这些名字，命中任意一个即可 =====
+    setViewRaDec(raDeg, decDeg, duration) { return this.lookAtRaDec(raDeg, decDeg, duration); }
+    aimAtRaDec(raDeg, decDeg, duration)   { return this.lookAtRaDec(raDeg, decDeg, duration); }
+    gotoRaDec(raDeg, decDeg, duration)    { return this.lookAtRaDec(raDeg, decDeg, duration); }
+    focusRaDec(raDeg, decDeg, duration)   { return this.lookAtRaDec(raDeg, decDeg, duration); }
+
     // ===== 公开：显示恒星信息面板（供搜索/收藏调用，与点击完全一致）=====
     showStarInfo(star) {
         if (!star) return;
