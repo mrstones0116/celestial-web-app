@@ -2,7 +2,7 @@
 
 A high-performance, browser-based 3D celestial sphere simulator with integrated AI-powered astrophotography recognition and conversational stargazing tours. Built with Three.js, FastAPI, Qwen-VL, and DeepSeek.
 
-![Version](https://img.shields.io/badge/version-2.1-blue)
+![Version](https://img.shields.io/badge/version-2.2-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.9+-yellow)
 ![Three.js](https://img.shields.io/badge/three.js-r128-orange)
@@ -19,15 +19,16 @@ A high-performance, browser-based 3D celestial sphere simulator with integrated 
 - **Interactive Controls**: Drag to rotate, scroll to zoom (4°–110° FOV), click any object for detailed info panel
 
 ### 📷 AI-Powered Photo Identification
-- **Dual-Image Analysis**: Sends both original photo and CLAHE-enhanced dark-adapted version to VL model
-- **Multi-Constellation Recognition**: Identifies all visible constellations in a single frame, not just the brightest
-- **Skeleton Star Filtering**: Returns only named bright stars per constellation — no HD/HIP/HR numeric designations
-- **Annotated Overlay**: Backend generates bounding boxes and labels directly on the enhanced image
-- **Zoomable Modal**: Center-screen popup with scroll-wheel zoom, pan, and one-click PNG save
-- **3D Cross-Highlighting**: Automatically focuses the 3D scene on identified stars with flash animation
-- **Anti-Hallucination Pipeline**: Two-stage VL review + HYG catalog cross-validation prevents false positives
+- **OpenCV Star Detection**: Median-background estimation + residual thresholding + connected-component analysis + bright-star de-duplication, with EXIF orientation fix and automatic downscaling for large images
+- **Adaptive K-Means Clustering**: K-means++ with multi-initialization, silhouette-based automatic K selection, outputs main star, edge stars, and neighbor clusters per cluster
+- **Multi-Version VL Input**: Sends original, brightened, inverted, and cluster-annotated images to the VL model for better faint-star recognition
+- **Whole-Image VL Recognition**: Each cluster is judged independently using color mapping, main-star position, member weights, and neighbor relationships
+- **Low-Confidence Recheck**: High-confidence clusters act as anchors; only low-confidence clusters are re-judged to keep the sky region physically self-consistent
+- **Annotated Overlay**: Backend returns star-point and cluster-colored PNG overlays for frontend display
+- **Debug Constellation Map**: With `DEBUG_VISION=1`, saves input / clustered / constellation-position annotated images to `backend/debug/`
+- **88-Constellation Normalization**: VL-returned abbreviations or full names are normalized to IAU 3-letter abbreviations
 
-### 🎬 AI Stargazing Tour (New)
+### 🎬 AI Stargazing Tour
 - **Natural-Language Planning**: Describe what you want to see in plain Chinese or English — "我想看夏季的星空" or "show me the Messier objects"
 - **LLM Intent Recognition**: Powered by DeepSeek (or any OpenAI-compatible endpoint), with automatic fallback to keyword matching
 - **Pre-Built Tour Templates**: Summer Triangle, Winter Orion, Bright Star Tour, Messier Marathon samples
@@ -53,9 +54,14 @@ celestial-web-app/
 │   ├── data/
 │   │   └── hygdata_v41.csv    # ~35 MB, not committed (see Quick Start)
 │   ├── vision/                # AI vision pipeline modules
-│   │   ├── star_detector.py   # OpenCV star point detection
-│   │   ├── skeleton_matcher.py# Constellation skeleton matching
-│   │   └── ...
+│   │   ├── __init__.py
+│   │   ├── pipeline.py        # Orchestration: detect → cluster → VL → recheck → annotate
+│   │   ├── detection.py       # OpenCV star detection
+│   │   ├── clustering.py      # Adaptive K-means + main/edge/neighbor computation
+│   │   ├── annotate.py        # Star / VL / constellation-position annotation
+│   │   ├── vl.py              # VL client + prompt builder + JSON parser
+│   │   ├── constellations.py  # 88-constellation table + name normalization
+│   │   └── config.py          # VisionConfig, env vars read once
 │   ├── tour/                  # Conversational tour module
 │   │   ├── api.py             # /api/tour/* endpoints
 │   │   ├── astro_utils.py     # RA/Dec → Alt/Az, GMST
@@ -136,10 +142,26 @@ All configuration lives in `backend/.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ZHIPU_API_KEY` | *(required)* | ModelScope access token for Qwen-VL |
+| `MODELSCOPE_API_KEY` / `ZHIPU_API_KEY` | *(required)* | ModelScope or Zhipu access token; either one works |
 | `ZHIPU_API_URL` | `https://api-inference.modelscope.cn/v1/chat/completions` | VL endpoint |
-| `VL_MODEL` | `Qwen/Qwen3-VL-8B-Instruct` | Vision-language model ID |
-| `VERIFY_MAX_MAG` | `6.5` | Max magnitude for HYG cross-validation |
+| `VL_MODEL` | `Qwen/Qwen3.8-Flash-Next` | Vision-language model ID (override for your deployment) |
+| `VISION_MAX_DIM` | `1280` | Longest-edge resize before detection |
+| `VISION_TOP_N` | `100` | Max number of stars to keep |
+| `VISION_MAX_UPLOAD_MB` | `20` | Upload size limit |
+| `VISION_EDGE_MARGIN` | `0.10` | Edge crop ratio to avoid lens distortion |
+| `VISION_DETECT_SIGMA` | `6.0` | Residual threshold in sigma units |
+| `VISION_FORCED_K` | `0` / `None` | Force K if >= 2 |
+| `VISION_MIN_K` | `2` | Minimum adaptive K |
+| `VISION_MAX_K` | `8` | Maximum adaptive K |
+| `VISION_KMEANS_N_INIT` | `10` | K-means multi-initialization count |
+| `VISION_KMEANS_MAX_ITER` | `200` | K-means max iterations |
+| `VISION_CLUSTER_MIN_STARS` | `3` | Minimum stars per cluster |
+| `VISION_WEIGHT_BRIGHTNESS` | `0.65` | Brightness weight in member scoring |
+| `VISION_WEIGHT_DISTANCE` | `0.35` | Distance-to-main-star weight |
+| `VISION_CONFIDENCE_THRESHOLD` | `0.51` | Low-confidence recheck threshold |
+| `VISION_VL_TIMEOUT` | `300` | VL request timeout (seconds) |
+| `VISION_VL_MAX_RETRIES` | `4` | VL retry count |
+| `VISION_VL_MAX_TOKENS` | `4000` | VL max output tokens |
 | `DEBUG_VISION` | `0` | Set to `1` to save debug images |
 
 ### AI Tour Module (DeepSeek)
@@ -157,19 +179,44 @@ All configuration lives in `backend/.env`:
 ```
 Photo Upload
     ↓
-CLAHE Enhancement (LAB L-channel)
+detect_stars
+    - EXIF transpose, longest-edge resize, grayscale
+    - Gaussian blur + median background estimation
+    - Residual threshold + connected-component analysis
+    - Sort by flux + min-distance de-duplication
     ↓
-Qwen-VL Dual-Image Analysis
+cluster_stars
+    - K-means++ with multi-initialization
+    - Adaptive K in [MIN_K, MAX_K]
+    - Silhouette score picks best K
+    - Compute main star, edge stars, neighbors, member weights
     ↓
-Stage 1: Initial Recognition → Season + Constellations + Bright Stars + BBox
+annotate_stars
+    - Frontend display image: star points + cluster colors
     ↓
-Stage 2: Self-Review → Remove hallucinations, validate evidence
+prepare_versions
+    - Original / brightened / inverted
     ↓
-HYG Catalog Cross-Check → Skeleton star filtering (no numeric IDs)
+annotate_clusters_for_vl
+    - VL input image: C0~Cn labels + main-star big-circle white-dot
     ↓
-Backend Annotation → Draw bbox + labels on enhanced image
+VLClient.chat_json
+    - Whole-image judgment of each cluster's constellation
+    - Returns constellation / abbr / confidence / alternative
     ↓
-Frontend Display → Result list + Zoomable modal + 3D highlight
+parse_vl_item + normalize_constellation
+    - Normalize to 88-constellation 3-letter abbreviations
+    ↓
+_vl_recheck
+    - Low-confidence clusters re-judged with high-confidence anchors
+    ↓
+Write back stars[i].cluster
+    ↓
+DEBUG_VISION=1
+    - Save input / clusters / constellations debug images
+    ↓
+Response
+    - stars / clusters / vl_clusters / vl_summary / vl_recheck / annotated_image
 ```
 
 ## 🎬 AI Tour Pipeline
@@ -211,9 +258,10 @@ Tour UI renders step 1; "下一步" triggers /next
 |---|---|
 | 3D Renderer | Three.js r128 (custom Alt-Az horizon system) |
 | Backend API | FastAPI + Uvicorn |
-| VL Model | Qwen3-VL-8B-Instruct (ModelScope) |
+| VL Model | Qwen/Qwen3.8-Flash-Next (overridable via `VL_MODEL`) |
 | Tour LLM | DeepSeek Flash (OpenAI-compatible API) |
-| Image Processing | OpenCV (CLAHE, star detection) |
+| Image Processing | OpenCV + NumPy + Pillow |
+| Clustering | Adaptive K-means / K-means++ / Silhouette |
 | Star Catalog | HYG Database v41 |
 | Desktop Wrapper | PyWebView |
 | Charts | Custom Canvas 2D RA-Dec projection |
@@ -226,6 +274,13 @@ Tour UI renders step 1; "下一步" triggers /next
 - **Moon phase** computed from Sun-Moon elongation angle, rendered procedurally on canvas texture each frame
 - **Sky color** uses smoothstep-interpolated color stops across 9 altitude breakpoints to avoid RGB mud at twilight transitions
 - **HYG loading** is local-first: reads `backend/data/hygdata_v41.csv` if present, otherwise downloads and caches it
+- **Star detection**: `detection.py` uses median background + residual threshold + connected components; edges are cropped, bright stars de-duplicated by min distance
+- **Clustering**: `clustering.py` tries K in `MIN_K~MAX_K`, sorts by silhouette desc with small-K tie-break to avoid over-segmentation
+- **Cluster payload**: each cluster contains `main_star`, `stars`, `edge_stars`, `neighbors`, `bbox`, `avg_brightness`
+- **VL inputs**: `prepare_versions` builds original / brightened / inverted; `annotate_clusters_for_vl` builds the C-numbered cluster map with main-star markers
+- **VL recheck**: after the first pass, clusters below `VISION_CONFIDENCE_THRESHOLD` are re-judged with high-confidence clusters as anchors
+- **Debug**: with `DEBUG_VISION=1`, saves `*_input.png`, `*_k*_clusters.png`, `*_k*_constellations.png`
+- **Central config**: all env vars are read once in `VisionConfig` (`vision/config.py`)
 - **Tour LLM** is fully optional: if no key is configured, `planner.detect_intent` handles Chinese/English keyword matching
 
 ## 🤝 Contributing
@@ -248,3 +303,5 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [ModelScope](https://modelscope.cn) — Qwen-VL model hosting
 - [DeepSeek](https://platform.deepseek.com) — Tour intent LLM
 - [Three.js](https://threejs.org) — WebGL rendering engine
+
+---
