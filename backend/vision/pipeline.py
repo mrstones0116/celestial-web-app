@@ -1,4 +1,4 @@
-"""识星全流程编排：检测 → 聚类 → VL → 低置信度重判 → 标注。"""
+"""识星全流程：检测 → VL 语义识别星座 → 标准投影参考图。"""
 import asyncio
 import base64
 from datetime import datetime
@@ -7,47 +7,40 @@ from typing import Any, Dict, List, Optional
 from fastapi import UploadFile
 
 from .annotate import (
-    annotate_clusters_for_vl,
-    annotate_constellation_positions,
     annotate_stars,
     prepare_versions,
+    render_constellation_reference,
 )
-from .clustering import cluster_stars
 from .config import DEBUG_DIR, VisionConfig
 from .detection import detect_stars
 from .vl import (
     VLClient,
-    build_full_prompt,
-    build_recheck_prompt,
-    parse_vl_item,
+    build_constellation_prompt,
+    parse_constellation_item,
 )
 
 
 class VisionPipeline:
-    def __init__(self):
+    def __init__(self, catalog=None):
         self.vl = VLClient()
+        self.catalog = catalog
 
     # ---------- 状态 ----------
 
     def status(self) -> Dict[str, Any]:
         cfg = VisionConfig
         return {
-            "engine": "opencv-local+adaptive-kmeans+vl",
+            "engine": "opencv-detect + vl-semantic + standard-projection",
             "configured": self.vl.configured,
             "model": self.vl.model,
-            "hint": "已就绪" if self.vl.configured
-                    else "未配置 MODELSCOPE_API_KEY / ZHIPU_API_KEY",
+            "catalog_available": self.catalog is not None,
             "top_n_default": cfg.TOP_N,
             "max_dim": cfg.MAX_DIM,
             "max_upload_mb": cfg.MAX_UPLOAD_MB,
             "edge_margin": cfg.EDGE_MARGIN,
-            "forced_k": cfg.FORCED_K,
-            "min_k": cfg.MIN_K,
-            "max_k": cfg.MAX_K,
-            "min_stars_per_cluster": cfg.CLUSTER_MIN_STARS,
-            "weight_brightness": cfg.WEIGHT_BRIGHTNESS,
-            "weight_distance": cfg.WEIGHT_DISTANCE,
+            "detect_sigma": cfg.DETECT_SIGMA,
             "confidence_threshold": cfg.CONFIDENCE_THRESHOLD,
+            "min_confidence_keep": cfg.MIN_CONFIDENCE_KEEP,
         }
 
     # ---------- 上传入口 ----------
@@ -94,284 +87,145 @@ class VisionPipeline:
         ow, oh = detection["original_size"]
         print(f"🔎 候选 {detection['candidate_count']} 个, 保留 {len(stars)} 颗")
 
-        # 2) 聚类（自适应 K）
-        cluster_results: List[Dict[str, Any]] = []
-        if len(stars) >= VisionConfig.MIN_K * VisionConfig.CLUSTER_MIN_STARS:
-            try:
-                cluster_results = await asyncio.to_thread(
-                    cluster_stars, stars, VisionConfig.FORCED_K,
-                )
-            except Exception:
-                import traceback; traceback.print_exc()
-
-        if not cluster_results:
-            return {
-                "success": True,
-                "identifiable": len(stars) > 0,
-                "count": len(stars),
-                "matched_count": len(stars),
-                "detected_star_count": len(stars),
-                "stars": stars,
-                "detected_stars": [{"x": s["x"], "y": s["y"]} for s in stars],
-                "clusters": [],
-                "cluster_k": None,
-                "cluster_score": None,
-                "all_cluster_results": [],
-                "vl_cluster_k": None,
-                "vl_clusters": [],
-                "vl_summary": None,
-                "vl_sky_region": None,
-                "vl_low_confidence_threshold": VisionConfig.CONFIDENCE_THRESHOLD,
-                "vl_recheck": None,
-                "image_width": w,
-                "image_height": h,
-                "original_width": ow,
-                "original_height": oh,
-                "threshold": detection["threshold"],
-                "candidate_count": detection["candidate_count"],
-                "edge_margin": detection["edge_margin"],
-                "roi": detection["roi"],
-                "annotated_image": "",
-                "annotated_mime": "image/png",
-                "source": "opencv-local+adaptive-kmeans+vl",
-                "message": f"检测 {len(stars)} 颗星，但聚类失败",
-            }
-
-        chosen = cluster_results[0]
-        chosen_k = chosen["k"]
-        print(f"🧩 聚类: K={chosen_k} silhouette={chosen['score']}")
-
-        # 3) 前端展示标注图
+        # 2) 星点图
         try:
-            chosen["annotated_image"] = await asyncio.to_thread(
-                annotate_stars, pil, chosen["stars"], chosen["clusters"],
+            star_annotated = await asyncio.to_thread(
+                annotate_stars, pil, stars, None,
             )
-            chosen["annotated_mime"] = "image/png"
         except Exception:
             import traceback; traceback.print_exc()
-            chosen["annotated_image"] = ""
-            chosen["annotated_mime"] = None
+            star_annotated = ""
 
-        # 4) VL 整图识别
-        vl_summary: Optional[Dict[str, Any]] = None
-        vl_recheck: Optional[Dict[str, Any]] = None
+        # 3) VL 语义识别
+        constellations: List[Dict[str, Any]] = []
+        vl_summary: Optional[str] = None
+        vl_sky_region: Optional[str] = None
+        vl_error: Optional[str] = None
 
-        if self.vl.configured:
-            print(f"🤖 VL 整图判断：K={chosen_k}，共 {len(chosen['clusters'])} 个簇")
+        if not self.vl.configured:
+            vl_error = "未配置 VL API Key"
+        else:
             try:
                 base_versions = await asyncio.to_thread(prepare_versions, pil)
-                vl_summary = await self._vl_identify(
-                    pil, chosen["clusters"], base_versions,
+                vl_result = await self._vl_identify_constellations(
+                    w, h, base_versions,
                 )
-                for c in chosen["clusters"]:
-                    vr = c.get("vl_result") or {}
-                    if vr.get("success"):
-                        print(f"   ✓ C{c['id']} → "
-                              f"{vr.get('constellation') or vr.get('constellation_abbr')} "
-                              f"({vr.get('confidence', 0):.2f})")
-                    else:
-                        print(f"   ✗ C{c['id']} → {vr.get('error')}")
+                if vl_result.get("success"):
+                    constellations = vl_result["constellations"]
+                    vl_summary = vl_result.get("summary")
+                    vl_sky_region = vl_result.get("sky_region")
+                    print(f"🤖 VL 识别到 {len(constellations)} 个星座：")
+                    for c in constellations:
+                        print(f"   · {c.get('name_cn') or c.get('name')} "
+                              f"({c['abbr']} {c['confidence']:.2f})")
+                else:
+                    vl_error = vl_result.get("error")
+                    print(f"   ✗ VL 失败: {vl_error}")
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                vl_error = str(e)
 
-                # 5) 低置信度重判
-                if vl_summary and vl_summary.get("success"):
-                    try:
-                        vl_recheck = await self._vl_recheck(
-                            pil, chosen["clusters"], base_versions,
-                            VisionConfig.CONFIDENCE_THRESHOLD,
-                        )
-                        if vl_recheck.get("success") and vl_recheck.get("changed_ids"):
-                            if vl_recheck.get("summary"):
-                                vl_summary["summary"] = vl_recheck["summary"]
-                            if vl_recheck.get("sky_region"):
-                                vl_summary["sky_region"] = vl_recheck["sky_region"]
-                            vl_summary["recheck"] = vl_recheck
-                    except Exception:
-                        import traceback; traceback.print_exc()
+        # 4) 标准投影参考图
+        constellation_annotated = ""
+        if constellations and self.catalog is not None:
+            try:
+                constellation_annotated = await asyncio.to_thread(
+                    render_constellation_reference,
+                    pil, constellations, self.catalog,
+                )
+                print("🎨 标准投影参考图已生成")
             except Exception:
                 import traceback; traceback.print_exc()
-        else:
-            for c in chosen["clusters"]:
-                c["vl_result"] = {"success": False, "error": "未配置 VL API Key"}
 
-        # 6) 回填 stars[i].cluster
-        if len(chosen.get("stars", [])) == len(stars):
-            for orig, marked in zip(stars, chosen["stars"]):
-                orig["cluster"] = int(marked.get("cluster", -1))
-
-        # 7) 调试图
+        # 5) 调试图
         if VisionConfig.DEBUG_VISION:
-            await asyncio.to_thread(self._save_debug, pil, chosen, chosen_k)
+            await asyncio.to_thread(
+                self._save_debug, pil, star_annotated, constellation_annotated,
+            )
 
-        # 8) 组装响应
+        # 6) 组装响应
         return self._build_response(
-            stars, chosen, vl_summary, vl_recheck,
+            stars, constellations,
+            vl_summary, vl_sky_region, vl_error,
             detection, w, h, ow, oh,
+            star_annotated, constellation_annotated,
         )
 
     # ---------- VL 步骤 ----------
 
-    async def _vl_identify(
+    async def _vl_identify_constellations(
         self,
-        pil,
-        clusters: List[Dict[str, Any]],
+        w: int,
+        h: int,
         base_versions: List[Dict[str, str]],
-    ) -> Dict[str, Any]:
-        if not self.vl.configured:
-            for c in clusters:
-                c["vl_result"] = {"success": False, "error": "未配置 VL API Key"}
-            return {"success": False, "error": "未配置 VL API Key"}
-
-        annotated = annotate_clusters_for_vl(pil, clusters)
-        images = list(base_versions) + [
-            {"b64": annotated, "mime": "image/png", "label": "聚类标注图"},
-        ]
-        prompt = build_full_prompt(clusters)
-
-        res = await self.vl.chat_json(prompt, images)
-        if not res.get("success"):
-            for c in clusters:
-                c["vl_result"] = {"success": False,
-                                  "error": res.get("error", "整图调用失败")}
-            return res
-
-        data = res["data"]
-        parsed = data.get("clusters") if isinstance(data, dict) else None
-        if not isinstance(parsed, list):
-            for c in clusters:
-                c["vl_result"] = {"success": False, "error": "返回缺少 clusters 字段"}
-            return {"success": False, "error": "返回缺少 clusters 字段"}
-
-        by_id: Dict[int, Dict[str, Any]] = {}
-        for item in parsed:
-            pr = parse_vl_item(item)
-            if pr is not None:
-                by_id[pr[0]] = pr[1]
-
-        for c in clusters:
-            c["vl_result"] = by_id.get(c["id"], {
-                "success": False, "error": "VL 未返回该簇的判断",
-            })
-
-        return {
-            "success": True,
-            "by_id": by_id,
-            "summary": str(data.get("summary") or "").strip(),
-            "sky_region": str(data.get("sky_region") or "").strip(),
-            "raw": data,
-        }
-
-    async def _vl_recheck(
-        self,
-        pil,
-        clusters: List[Dict[str, Any]],
-        base_versions: List[Dict[str, str]],
-        threshold: float,
     ) -> Dict[str, Any]:
         if not self.vl.configured:
             return {"success": False, "error": "未配置 VL API Key"}
 
-        confirmed, low_conf = [], []
-        for c in clusters:
-            vr = c.get("vl_result") or {}
-            if not vr.get("success"):
-                low_conf.append(c)
-                continue
-            try:
-                conf = float(vr.get("confidence") or 0.0)
-            except (TypeError, ValueError):
-                conf = 0.0
-            (confirmed if conf >= threshold else low_conf).append(
-                (c, vr) if conf >= threshold else c
-            )
-
-        if not low_conf:
-            return {"success": True, "no_change": True, "changed_ids": [], "changes": []}
-        if not confirmed:
-            return {"success": True, "no_change": True, "changed_ids": [], "changes": [],
-                    "skipped": "无高置信度锚点，跳过重新判断"}
-
-        prompt = build_recheck_prompt(clusters, confirmed, low_conf, threshold)
-        annotated = annotate_clusters_for_vl(pil, clusters)
-        images = list(base_versions) + [
-            {"b64": annotated, "mime": "image/png", "label": "聚类标注图"},
-        ]
-
-        print(f"🔁 VL 重新判断：低置信度 {len(low_conf)} 个"
-              f"（<{threshold}），锚点 {len(confirmed)} 个 ...")
-        res = await self.vl.chat_json(prompt, images)
+        prompt = build_constellation_prompt(w, h)
+        print(f"🤖 VL 整图识别星座（{len(base_versions)} 张图）...")
+        res = await self.vl.chat_json(prompt, base_versions)
         if not res.get("success"):
             return res
 
         data = res["data"]
-        parsed = data.get("clusters") if isinstance(data, dict) else None
-        if not isinstance(parsed, list):
-            return {"success": False, "error": "重新判断返回缺少 clusters 字段"}
+        raw_list = data.get("constellations") if isinstance(data, dict) else None
+        if not isinstance(raw_list, list):
+            return {"success": False, "error": "返回缺少 constellations 字段"}
 
-        low_ids = {int(c["id"]) for c in low_conf}
-        updated: Dict[int, Dict[str, Any]] = {}
-        for item in parsed:
-            pr = parse_vl_item(item)
-            if pr is not None and pr[0] in low_ids:
-                updated[pr[0]] = pr[1]
+        parsed: List[Dict[str, Any]] = []
+        for item in raw_list:
+            p = parse_constellation_item(item)
+            if p is not None:
+                parsed.append(p)
 
-        changes: List[Dict[str, Any]] = []
-        for c in clusters:
-            if c["id"] not in updated:
-                continue
-            old = c.get("vl_result") or {}
-            new = updated[c["id"]]
-            c["vl_result"] = new
-            changes.append({
-                "id": c["id"],
-                "old": {
-                    "constellation": old.get("constellation"),
-                    "constellation_abbr": old.get("constellation_abbr"),
-                    "confidence": old.get("confidence"),
-                    "success": bool(old.get("success")),
-                },
-                "new": {
-                    "constellation": new.get("constellation"),
-                    "constellation_abbr": new.get("constellation_abbr"),
-                    "confidence": new.get("confidence"),
-                    "success": True,
-                },
-            })
-            print(f"   ↻ C{c['id']} "
-                  f"{old.get('constellation_abbr') or old.get('constellation') or '?'}"
-                  f"({old.get('confidence', 0)}) → "
-                  f"{new.get('constellation_abbr')}({new.get('confidence')})")
+        # 硬地板
+        floor = VisionConfig.MIN_CONFIDENCE_KEEP
+        parsed = [c for c in parsed if c["confidence"] >= floor]
+
+        # 按置信度降序
+        parsed.sort(key=lambda c: -c["confidence"])
+
+        # 软上限
+        MAX_CONSTELLATIONS = 8
+        if len(parsed) > MAX_CONSTELLATIONS:
+            print(f"⚠️ VL 返回 {len(parsed)} 个，截断为前 {MAX_CONSTELLATIONS}")
+            parsed = parsed[:MAX_CONSTELLATIONS]
+
+        low = [c for c in parsed if c["low_confidence"]]
+        if low:
+            print(f"⚠️ {len(low)} 个星座置信度 < "
+                  f"{VisionConfig.CONFIDENCE_THRESHOLD}: "
+                  f"{[c['abbr'] for c in low]}")
 
         return {
             "success": True,
-            "changed_ids": [ch["id"] for ch in changes],
-            "changes": changes,
+            "constellations": parsed,
             "summary": str(data.get("summary") or "").strip(),
             "sky_region": str(data.get("sky_region") or "").strip(),
         }
 
     # ---------- 调试图 ----------
 
-    def _save_debug(self, pil, chosen, chosen_k: int):
+    def _save_debug(
+        self,
+        pil,
+        star_b64: str,
+        const_b64: str,
+    ):
         try:
             DEBUG_DIR.mkdir(exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             pil.save(DEBUG_DIR / f"{ts}_input.png")
-
-            if chosen.get("annotated_image"):
-                (DEBUG_DIR / f"{ts}_k{chosen_k}_clusters.png").write_bytes(
-                    base64.b64decode(chosen["annotated_image"])
+            if star_b64:
+                (DEBUG_DIR / f"{ts}_stars.png").write_bytes(
+                    base64.b64decode(star_b64)
                 )
-            try:
-                const_b64 = annotate_constellation_positions(
-                    pil, chosen["clusters"]
-                )
-                (DEBUG_DIR / f"{ts}_k{chosen_k}_constellations.png").write_bytes(
+            if const_b64:
+                (DEBUG_DIR / f"{ts}_constellations_reference.png").write_bytes(
                     base64.b64decode(const_b64)
                 )
-                chosen["constellation_annotated_image"] = const_b64
-                print(f"💾 调试图已保存: {ts}_k{chosen_k}_*.png")
-            except Exception as e:
-                print(f"⚠️ 生成星座位置标注图失败: {e}")
+            print(f"💾 调试图已保存: {ts}_*.png")
         except Exception as e:
             print(f"⚠️ 保存调试图失败: {e}")
 
@@ -383,60 +237,44 @@ class VisionPipeline:
 
     @staticmethod
     def _build_response(
-        stars, chosen, vl_summary, vl_recheck,
+        stars, constellations,
+        vl_summary, vl_sky_region, vl_error,
         detection, w, h, ow, oh,
+        star_annotated, constellation_annotated,
     ) -> Dict[str, Any]:
-        clusters = chosen["clusters"]
-        vl_ok = sum(1 for c in clusters
-                    if (c.get("vl_result") or {}).get("success"))
 
-        if vl_ok:
-            msg = (f"检测 {len(stars)} 颗星，K={chosen['k']}；"
-                   f"VL 成功判断 {vl_ok}/{len(clusters)} 簇")
+        if not constellations:
+            if vl_error:
+                msg = f"检测 {len(stars)} 颗星；VL 未返回有效结果: {vl_error}"
+            else:
+                msg = f"检测 {len(stars)} 颗星；未识别出可辨认的星座"
         else:
-            msg = f"检测 {len(stars)} 颗星，K={chosen['k']}；VL 未返回有效结果"
+            names = "、".join(
+                c.get("name_cn") or c.get("name") or c.get("abbr") or "?"
+                for c in constellations
+            )
+            msg = (f"检测 {len(stars)} 颗星；识别 {len(constellations)} 个星座，"
+                   f"已生成标准投影参考图: {names}")
 
         return {
             "success": True,
-            "identifiable": len(stars) > 0,
+            "identifiable": len(constellations) > 0 or len(stars) > 0,
 
+            # 星点
             "count": len(stars),
-            "matched_count": len(stars),
-            "detected_star_count": len(stars),
             "stars": stars,
             "detected_stars": [{"x": s["x"], "y": s["y"]} for s in stars],
 
-            "clusters": clusters,
-            "cluster_k": chosen["k"],
-            "cluster_score": chosen["score"],
+            # 星座
+            "constellations": constellations,
+            "constellation_count": len(constellations),
 
-            "all_cluster_results": [{
-                "k": chosen["k"],
-                "score": chosen["score"],
-                "cluster_count": len(clusters),
-                "clusters": clusters,
-                "annotated_image": chosen.get("annotated_image", ""),
-                "annotated_mime": "image/png",
-                "used_for_vl": True,
-            }],
+            "vl_summary": vl_summary,
+            "vl_sky_region": vl_sky_region,
+            "vl_error": vl_error,
+            "vl_confidence_threshold": VisionConfig.CONFIDENCE_THRESHOLD,
 
-            "vl_cluster_k": chosen["k"],
-            "vl_clusters": clusters,
-            "vl_summary": vl_summary.get("summary") if vl_summary else None,
-            "vl_sky_region": vl_summary.get("sky_region") if vl_summary else None,
-
-            "vl_low_confidence_threshold": VisionConfig.CONFIDENCE_THRESHOLD,
-            "vl_recheck": {
-                "performed": bool(
-                    vl_recheck and vl_recheck.get("success")
-                    and not vl_recheck.get("no_change")
-                ),
-                "threshold": VisionConfig.CONFIDENCE_THRESHOLD,
-                "changed_ids": vl_recheck.get("changed_ids", []) if vl_recheck else [],
-                "changes": vl_recheck.get("changes", []) if vl_recheck else [],
-                "skipped": vl_recheck.get("skipped") if vl_recheck else None,
-            } if vl_recheck else None,
-
+            # 图像信息
             "image_width": w,
             "image_height": h,
             "original_width": ow,
@@ -446,9 +284,12 @@ class VisionPipeline:
             "edge_margin": detection["edge_margin"],
             "roi": detection["roi"],
 
-            "annotated_image": chosen.get("annotated_image", ""),
+            # 标注图
+            "star_annotated_image": star_annotated,
+            "constellation_annotated_image": constellation_annotated,
+            "annotated_image": constellation_annotated or star_annotated,
             "annotated_mime": "image/png",
 
-            "source": "opencv-local+adaptive-kmeans+vl",
+            "source": "opencv-detect+vl-semantic+standard-projection",
             "message": msg,
         }
