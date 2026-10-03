@@ -128,7 +128,7 @@ class VisionPipeline:
             try:
                 plate_fit = await asyncio.to_thread(
                     self._try_plate_solve,
-                    constellations, stars, (w, h),   # ← 加 (w, h)
+                    constellations, stars, (w, h),
                 )
                 if plate_fit:
                     projector = plate_fit["projector"]
@@ -140,7 +140,7 @@ class VisionPipeline:
             except Exception:
                 import traceback; traceback.print_exc()
 
-        # 5) 绘制（projector 为 None 时 annotate 内部退回标准投影）
+        # 5) 绘制
         constellation_annotated = ""
         if constellations and self.catalog is not None:
             try:
@@ -150,11 +150,10 @@ class VisionPipeline:
                     constellations,
                     self.catalog,
                     projector=projector,
-                    draw_extra_members=True,
-                    extra_members_max_mag=VisionConfig.PLATE_TEMPLATE_MAG,
+                    projector_is_solved=(plate_fit is not None),
                 )
                 print("🎨 星座投影图已生成"
-                      f"（{'plate-solved' if projector else 'standard'}）")
+                      f"（{'plate-solved' if plate_fit else 'standard'}）")
             except Exception:
                 import traceback; traceback.print_exc()
 
@@ -175,9 +174,6 @@ class VisionPipeline:
     # ---------- plate solve ----------
 
     def _try_plate_solve(self, constellations, stars, image_size):
-        """
-        收集这些星座的 HYG 亮星做模板，与图像星点做 RANSAC + ICP 拟合。
-        """
         template_ra: List[float] = []
         template_dec: List[float] = []
         template_mag: List[float] = []
@@ -218,7 +214,7 @@ class VisionPipeline:
             template_radec=template_radec,
             image_points=image_points,
             template_mags=template_mags,
-            image_size=image_size,               # ← 新增
+            image_size=image_size,
             ransac_iter=VisionConfig.PLATE_RANSAC_ITER,
             eps_px=VisionConfig.PLATE_EPS_PX,
             min_inliers=VisionConfig.PLATE_MIN_INLIERS,

@@ -9,31 +9,24 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from .projection import _radec_to_xyz, gnomonic_project
 
-_CLUSTER_PALETTE = [
-    (255, 0, 0), (255, 140, 0), (255, 0, 180), (180, 0, 255),
-    (255, 200, 0), (0, 200, 255), (0, 220, 100), (255, 100, 100),
-]
+# 星座绘制统一用白色
+_WHITE = (255, 255, 255)
 
 _FONT_CACHE: Dict[Tuple[int, str], Any] = {}
 
-# 跨平台中文字体路径（绝对路径优先）
 _CN_FONT_PATHS = [
-    # Windows
-    r"C:\Windows\Fonts\msyh.ttc",          # 微软雅黑
-    r"C:\Windows\Fonts\msyhbd.ttc",        # 微软雅黑 Bold
-    r"C:\Windows\Fonts\simhei.ttf",        # 黑体
-    r"C:\Windows\Fonts\simsun.ttc",        # 宋体
-    r"C:\Windows\Fonts\Deng.ttf",          # 等线
-    # macOS
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\simsun.ttc",
+    r"C:\Windows\Fonts\Deng.ttf",
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/STHeiti Medium.ttc",
     "/Library/Fonts/Arial Unicode.ttf",
-    # Linux
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    # 相对路径（当前工作目录，或系统字体目录能被 PIL 找到）
     "msyh.ttc",
     "msyhbd.ttc",
     "simhei.ttf",
@@ -42,7 +35,6 @@ _CN_FONT_PATHS = [
     "wqy-microhei.ttc",
 ]
 
-# 英文/数字专用（更清晰），找不到就用中文字体兜底
 _EN_FONT_PATHS = [
     r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\arial.ttf",
@@ -57,20 +49,11 @@ _EN_FONT_PATHS = [
 
 
 def _load_font(size: int, lang: str = "cn"):
-    """
-    lang:
-      "cn" → 中文字体（同时支持英文和数字，标签常用）
-      "en" → 英文字体（Arial / DejaVu），用于纯英文标签
-    """
     key = (size, lang)
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
 
-    paths = _CN_FONT_PATHS if lang == "cn" else _EN_FONT_PATHS
-    # en 找不到就退回 cn
-    if lang == "en":
-        paths = _EN_FONT_PATHS + _CN_FONT_PATHS
-
+    paths = _CN_FONT_PATHS if lang == "cn" else (_EN_FONT_PATHS + _CN_FONT_PATHS)
     font = None
     for p in paths:
         try:
@@ -96,7 +79,7 @@ def _to_b64(img: Image.Image) -> str:
 
 
 def palette_color(cid: int):
-    return _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
+    return _WHITE
 
 
 # ============================================================
@@ -127,22 +110,16 @@ def annotate_stars(
     else:
         radii = [r_base] * len(stars)
 
-    use_cluster_color = bool(clusters) and len(clusters) > 1
     for s, r in zip(stars, radii):
         px, py = float(s["px"]), float(s["py"])
-        if use_cluster_color:
-            color = palette_color(int(s.get("cluster", 0)))
-        else:
-            color = (255, 0, 0)
         draw.ellipse(
             [px - r * 2.2, py - r * 2.2, px + r * 2.2, py + r * 2.2],
-            fill=(color[0], color[1], color[2], 60),
+            fill=(*_WHITE, 60),
         )
         draw.ellipse(
             [px - r, py - r, px + r, py + r],
-            fill=(color[0], color[1], color[2], 255),
-            outline=(max(0, color[0] - 100), max(0, color[1] - 60),
-                     max(0, color[2] - 60), 255),
+            fill=(*_WHITE, 255),
+            outline=(180, 180, 180, 255),
             width=1,
         )
     return _to_b64(img)
@@ -235,7 +212,7 @@ def _match_endpoints_to_hyg(
 
 
 # ============================================================
-# 标准投影 fallback（plate solve 失败时用）
+# 标准投影 projector
 # ============================================================
 
 def _make_standard_projector(
@@ -270,7 +247,7 @@ def _make_standard_projector(
 
 
 # ============================================================
-# 星座投影绘制（plate solve 或标准投影）
+# 星座投影绘制
 # ============================================================
 
 def render_constellation_reference(
@@ -278,16 +255,21 @@ def render_constellation_reference(
     constellations: List[Dict[str, Any]],
     catalog,
     projector: Optional[Callable[[float, float], Optional[Tuple[float, float]]]] = None,
-    dim_base: float = 0.55,
+    projector_is_solved: bool = False,
+    dim_base: float = 1.0,
     endpoint_match_deg: float = 0.5,
     draw_extra_members: bool = False,
     extra_members_max_mag: float = 4.5,
+    fov_scale: float = 1.8,
+    extra_margin_ratio: float = 0.05,
 ) -> str:
     """
-    绘制星座骨架 + 端点星。
+    绘制星座骨架 + 端点星。所有星座和连线统一用白色。
 
-    projector 为 None 时退回"标准投影"（以骨架端点质心为中心，
-    FOV 自动覆盖）。
+    - projector 为 None：用"标准投影"，以置信度最高的星座为锚点
+    - projector_is_solved=True：额外扫描整个天区，把所有落在图像内的
+      星座也一并画出来（只需 >= 2 个端点投影在图像内）
+    - 溢出画面的部分不裁剪
     """
     img = base_image.convert("RGB").copy()
     if dim_base < 1.0:
@@ -295,43 +277,40 @@ def render_constellation_reference(
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
 
-    # ---- 收集骨架 + 端点星 ----
-    per_abbr_lines: Dict[str, List[List[List[float]]]] = {}
-    per_abbr_stars: Dict[str, List[Dict[str, Any]]] = {}
-    per_abbr_members: Dict[str, List[Dict[str, Any]]] = {}
-    all_ra: List[float] = []
-    all_dec: List[float] = []
-
-    for c in constellations:
-        abbr = c.get("abbr")
-        if not abbr:
-            continue
-        lines = catalog.get_lines(abbr)
-        if not lines:
-            continue
-        per_abbr_lines[abbr] = lines
-
-        endpoints = _collect_skeleton_endpoints(catalog, abbr)
-        members = catalog.get_members(abbr)
-        matched = _match_endpoints_to_hyg(
-            endpoints, members, max_ang_deg=endpoint_match_deg,
-        )
-        per_abbr_stars[abbr] = matched
-        per_abbr_members[abbr] = members
-
-        for ra, dec in endpoints:
-            all_ra.append(ra)
-            all_dec.append(dec)
-
-    if not all_ra:
-        return _to_b64(img)
-
     # ---- 决定 projector ----
     ra0 = dec0 = None
     fov = None
+
     if projector is None:
-        ra_arr = np.array(all_ra, dtype=float)
-        dec_arr = np.array(all_dec, dtype=float)
+        anchor_abbr = None
+        anchor_pts: List[Tuple[float, float]] = []
+        for c in constellations:
+            abbr = c.get("abbr")
+            if not abbr:
+                continue
+            pts = _collect_skeleton_endpoints(catalog, abbr)
+            if pts:
+                anchor_abbr = abbr
+                anchor_pts = pts
+                break
+
+        if not anchor_pts:
+            for c in constellations:
+                abbr = c.get("abbr")
+                if not abbr:
+                    continue
+                anchor_pts.extend(_collect_skeleton_endpoints(catalog, abbr))
+        if len(anchor_pts) < 2:
+            return _to_b64(img)
+
+        if anchor_abbr:
+            print(f"🎯 投影锚点 = 最高置信度星座 {anchor_abbr} "
+                  f"({len(anchor_pts)} 个骨架端点)")
+        else:
+            print(f"⚠️ 无有效锚点，回退到全部 {len(anchor_pts)} 个端点")
+
+        ra_arr = np.array([p[0] for p in anchor_pts], dtype=float)
+        dec_arr = np.array([p[1] for p in anchor_pts], dtype=float)
         xyz = _radec_to_xyz(ra_arr, dec_arr)
         v0 = xyz.mean(axis=0)
         n0 = float(np.linalg.norm(v0))
@@ -346,23 +325,56 @@ def render_constellation_reference(
         max_ang = float(ang_deg.max())
         if max_ang < 1e-3:
             max_ang = 1.0
-        fov = float(np.clip(max_ang * 2.0 * 1.6, 5.0, 150.0))
+        fov = float(np.clip(max_ang * 2.0 * fov_scale, 5.0, 150.0))
 
         projector = _make_standard_projector(w, h, ra0, dec0, fov)
 
+    # ---- 决定绘制清单 ----
+    identified_abbrs: List[str] = []
+    for c in constellations:
+        abbr = c.get("abbr")
+        if abbr and abbr not in identified_abbrs:
+            identified_abbrs.append(abbr)
+
+    extra_abbrs: List[str] = []
+    if projector_is_solved:
+        margin = max(w, h) * extra_margin_ratio
+        for abbr in catalog.all_abbrs():
+            if abbr in identified_abbrs:
+                continue
+            pts = _collect_skeleton_endpoints(catalog, abbr)
+            if not pts:
+                continue
+            in_count = 0
+            for ra, dec in pts:
+                p = projector(ra, dec)
+                if p is None:
+                    continue
+                px, py = p
+                if (-margin <= px <= w + margin
+                        and -margin <= py <= h + margin):
+                    in_count += 1
+                    if in_count >= 2:
+                        break
+            if in_count >= 2:
+                extra_abbrs.append(abbr)
+
+        if extra_abbrs:
+            print(f"🔭 天区扫描：额外发现 {len(extra_abbrs)} 个星座 "
+                  f"[{', '.join(extra_abbrs)}]")
+        else:
+            print("🔭 天区扫描：未发现其他星座")
+
+    all_abbrs = identified_abbrs + extra_abbrs
+
     # ---- 绘制 ----
     r_base = max(3.0, min(w, h) * 0.006)
-    font_label = _load_font(max(16, int(min(w, h) * 0.024)))
-    font_small = _load_font(max(11, int(min(w, h) * 0.016)))
+    font_label = _load_font(max(16, int(min(w, h) * 0.024)), lang="cn")
+    font_small = _load_font(max(11, int(min(w, h) * 0.016)), lang="en")
 
-    for i, c in enumerate(constellations):
-        abbr = c.get("abbr")
-        if abbr not in per_abbr_lines:
-            continue
-        color = _CLUSTER_PALETTE[i % len(_CLUSTER_PALETTE)]
-
-        # 骨架线
-        for line in per_abbr_lines[abbr]:
+    for abbr in all_abbrs:
+        # ---- 骨架线 ----
+        for line in catalog.get_lines(abbr):
             seg: List[Tuple[float, float]] = []
             for ra, dec in line:
                 p = projector(ra, dec)
@@ -374,17 +386,22 @@ def render_constellation_reference(
                     seg.append(p)
                 else:
                     if len(seg) >= 2:
-                        draw.line(seg, fill=(*color, 230),
+                        draw.line(seg, fill=(*_WHITE, 230),
                                   width=max(2, int(r_base * 0.8)),
                                   joint="curve")
                     seg = []
             if len(seg) >= 2:
-                draw.line(seg, fill=(*color, 230),
+                draw.line(seg, fill=(*_WHITE, 230),
                           width=max(2, int(r_base * 0.8)),
                           joint="curve")
 
-        # 端点星
-        for m in per_abbr_stars.get(abbr, []):
+        # ---- 端点星 ----
+        endpoints = _collect_skeleton_endpoints(catalog, abbr)
+        members = catalog.get_members(abbr)
+        matched = _match_endpoints_to_hyg(
+            endpoints, members, max_ang_deg=endpoint_match_deg,
+        )
+        for m in matched:
             try:
                 ra_m = float(m["ra"])
                 dec_m = float(m["dec"])
@@ -413,8 +430,8 @@ def render_constellation_reference(
 
             draw.ellipse(
                 [px - rr, py - rr, px + rr, py + rr],
-                fill=(*color, 240),
-                outline=(255, 255, 255, 230),
+                fill=(*_WHITE, 240),
+                outline=(0, 0, 0, 220),
                 width=1,
             )
 
@@ -433,13 +450,13 @@ def render_constellation_reference(
                         fill=(0, 0, 0, 170),
                     )
                     draw.text((tx, ty), nm, font=font_small,
-                              fill=(240, 240, 240, 240))
+                              fill=(*_WHITE, 240))
                 except Exception:
                     pass
 
-        # 可选：额外画星座成员星
+        # ---- 额外成员星（默认关闭）----
         if draw_extra_members:
-            for m in per_abbr_members.get(abbr, []):
+            for m in members:
                 try:
                     ra_m = float(m["ra"])
                     dec_m = float(m["dec"])
@@ -459,13 +476,13 @@ def render_constellation_reference(
                 rr = r_base * 0.6
                 draw.ellipse(
                     [px - rr, py - rr, px + rr, py + rr],
-                    outline=(*color, 160), width=1,
+                    outline=(*_WHITE, 160), width=1,
                 )
 
-        # 星座名（骨架端点质心）
+        # ---- 星座名 ----
         cx_list: List[float] = []
         cy_list: List[float] = []
-        for ra, dec in _collect_skeleton_endpoints(catalog, abbr):
+        for ra, dec in endpoints:
             p = projector(ra, dec)
             if p is None:
                 continue
@@ -486,25 +503,26 @@ def render_constellation_reference(
                 draw.rectangle(
                     [tx - 4, ty - 3, tx + tw2 + 4, ty + th2 + 3],
                     fill=(0, 0, 0, 200),
-                    outline=(*color, 255), width=2,
+                    outline=(*_WHITE, 255), width=2,
                 )
                 draw.text((tx, ty), label, font=font_label,
-                          fill=(*color, 255))
+                          fill=(*_WHITE, 255))
             except Exception:
                 pass
 
-    # 角标
+    # ---- 角标 ----
     if ra0 is not None and dec0 is not None and fov is not None:
         info = (f"standard view  RA0={ra0:.2f}°  Dec0={dec0:.2f}°  "
                 f"FOV={fov:.1f}°")
     else:
         info = "plate-solved view"
     try:
-        bb = draw.textbbox((0, 0), info, font=font_small)
+        font_info = _load_font(max(12, int(min(w, h) * 0.015)), lang="en")
+        bb = draw.textbbox((0, 0), info, font=font_info)
         tw3, th3 = bb[2] - bb[0], bb[3] - bb[1]
         draw.rectangle([6, 6, 6 + tw3 + 8, 6 + th3 + 6],
                        fill=(0, 0, 0, 180))
-        draw.text((10, 9), info, font=font_small,
+        draw.text((10, 9), info, font=font_info,
                   fill=(210, 210, 210, 230))
     except Exception:
         pass

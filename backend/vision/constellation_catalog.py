@@ -204,7 +204,6 @@ class ConstellationCatalog:
                 except (TypeError, ValueError, KeyError):
                     continue
 
-                # 星名：优先 proper，没有则 bf
                 proper = _safe_str(row.get("proper"))
                 bf = _safe_str(row.get("bf"))
                 display = proper or bf
@@ -215,9 +214,9 @@ class ConstellationCatalog:
                     n_bf_only += 1
 
                 rows.append({
-                    "name": proper,          # 传统星名（可能为空）
-                    "bf": bf,                # Bayer/Flamsteed 编号
-                    "display_name": display,  # 用于绘制标签的最终星名
+                    "name": proper,
+                    "bf": bf,
+                    "display_name": display,
                     "ra": ra,
                     "dec": dec,
                     "mag": mag,
@@ -234,7 +233,7 @@ class ConstellationCatalog:
               f"（proper={n_proper}, bf-only={n_bf_only}）")
         self._members_loaded = True
 
-    # ---------- 查询（惰性触发） ----------
+    # ---------- 查询 ----------
 
     def _ensure(self):
         if not self._lines_loaded:
@@ -256,6 +255,11 @@ class ConstellationCatalog:
     def has(self, abbr: str) -> bool:
         self._ensure()
         return abbr in self._members or abbr in self._lines
+
+    def all_abbrs(self) -> List[str]:
+        """返回所有已知星座的缩写（骨架或成员表里有就算）。"""
+        self._ensure()
+        return sorted(set(self._lines.keys()) | set(self._members.keys()))
 
     def stats(self) -> Dict[str, int]:
         return {
