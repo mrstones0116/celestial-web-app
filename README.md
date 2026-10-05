@@ -2,7 +2,7 @@
 
 A high-performance, browser-based 3D celestial sphere simulator with integrated AI-powered astrophotography recognition (plate solving) and conversational stargazing tours. Built with Three.js, FastAPI, Qwen-VL, and DeepSeek.
 
-![Version](https://img.shields.io/badge/version-2.2-blue)
+![Version](https://img.shields.io/badge/version-2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.9+-yellow)
 ![Three.js](https://img.shields.io/badge/three.js-r128-orange)
@@ -32,12 +32,16 @@ A high-performance, browser-based 3D celestial sphere simulator with integrated 
 - **Star Names**: Proper names when available, falls back to Bayer designations (`Betelgeuse` → `α Ori`)
 
 ### 🎬 AI Stargazing Tour
-- **Natural-Language Planning**: Describe what you want to see in plain Chinese or English — "我想看夏季的星空" or "show me the Messier objects"
-- **LLM Intent Recognition**: Powered by DeepSeek (or any OpenAI-compatible endpoint), with automatic fallback to keyword matching
+- **Snapshot-Driven Planning**: Reads the live sky state from the 3D scene (visible constellations, planets, Messier objects, sun altitude) and asks the LLM to plan a tour — **no user input required**
+- **Natural-Language Planning**: Also accepts free-form requests like "我想看夏季的星空" or "show me the Messier objects"
+- **Reasoning-Model Ready**: Full support for DeepSeek V4-series and other thinking models — automatically falls back to `reasoning_content` when `content` is empty, and enforces JSON output via `response_format`
+- **Structured JSON Guarantee**: Uses `response_format={"type": "json_object"}` with automatic 400-downgrade retry for compatibility layers that don't support it
+- **Configurable Token Budget**: Per-call `max_tokens` overridable via env vars, tuned for both reasoning and non-reasoning models
 - **Pre-Built Tour Templates**: Summer Triangle, Winter Orion, Bright Star Tour, Messier Marathon samples
-- **Step-by-Step Narration**: Each stop includes short/long narration, observation tips, and camera focus hints
+- **Step-by-Step Narration**: Each stop includes short/long narration, observation tips, best viewing window, cultural story, and camera focus hints
 - **Session Management**: Server-side session store with TTL cleanup, pause / next / prev / stop controls
 - **Altitude-Azimuth Annotation**: Each target is annotated with real-time alt/az for the observer's location and time
+- **Graceful Fallback**: If the LLM is unreachable, a local planner builds a tour from the current sky state
 
 ### 🕐 Time & Location Control
 - Full date/time editor with adjustable simulation speed (0.5× to 10×)
@@ -70,8 +74,8 @@ celestial-web-app/
 │   ├── tour/                  # Conversational tour module
 │   │   ├── api.py             # /api/tour/* endpoints
 │   │   ├── astro_utils.py     # RA/Dec → Alt/Az, GMST
-│   │   ├── llm_client.py      # DeepSeek-backed intent parser
-│   │   ├── planner.py         # Intent → TourPlan
+│   │   ├── llm_client.py      # DeepSeek-backed intent parser + snapshot planner
+│   │   ├── planner.py         # Intent → TourPlan, LLM JSON → TourPlan
 │   │   ├── schemas.py         # Pydantic models
 │   │   ├── session_store.py   # In-memory session store (TTL)
 │   │   └── templates.py       # Built-in tour routes
@@ -86,7 +90,7 @@ celestial-web-app/
 │   │   ├── time.js            # Time simulation engine
 │   │   ├── search.js          # Star search with autocomplete
 │   │   ├── dso.js             # Deep sky object catalog
-│   │   └── tour.js            # AI tour UI + API client
+│   │   └── tour.js            # AI tour UI + snapshot prompt builder
 │   ├── vision.js              # Photo identification UI + modal
 │   ├── css/style.css          # Dark theme styling
 │   └── data/
@@ -100,7 +104,7 @@ celestial-web-app/
 - Python 3.9+
 - Node.js (optional, for frontend dev)
 - **ModelScope API Key** for photo identification ([Get one here](https://modelscope.cn/my/myaccesstoken))
-- **DeepSeek API Key** for the AI tour module ([Get one here](https://platform.deepseek.com)) — *optional, falls back to keyword matching*
+- **DeepSeek API Key** for the AI tour module ([Get one here](https://platform.deepseek.com)) — *optional, falls back to local planning*
 
 ### Installation
 
@@ -178,11 +182,17 @@ All configuration lives in `backend/.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TOUR_LLM_API_KEY` | *(optional)* | DeepSeek API key. If unset, tour falls back to keyword matching |
+| `TOUR_LLM_ENABLED` | `1` | Set to `0` to disable LLM entirely (local planner only) |
+| `TOUR_LLM_API_KEY` | *(optional)* | DeepSeek API key. If unset, the local planner handles all requests |
 | `TOUR_LLM_API_URL` | `https://api.deepseek.com/v1/chat/completions` | Chat completions endpoint |
-| `TOUR_LLM_MODEL` | `deepseek-flash` | Model ID |
-| `TOUR_LLM_ENABLED` | `1` | Set to `0` to disable LLM (keyword mode) |
-| `TOUR_LLM_TIMEOUT` | `15` | Request timeout in seconds |
+| `TOUR_LLM_MODEL` | `deepseek-chat` | Model ID. Use `deepseek-reasoner` for reasoning models |
+| `TOUR_LLM_TIMEOUT` | `120` | Base request timeout in seconds (overridden per call for skeleton) |
+| `TOUR_LLM_MAX_TOKENS_PARSE` | `4000` | Token budget for intent parsing |
+| `TOUR_LLM_MAX_TOKENS_NARRATION` | `8000` | Token budget for single-target narration |
+| `TOUR_LLM_MAX_TOKENS_BATCH` | `32000` | Token budget for batch narration (all stops at once) |
+| `TOUR_LLM_MAX_TOKENS_SKELETON` | `64000` | Token budget for the snapshot tour skeleton (reasoning models need headroom) |
+
+> **Reasoning models**: The client automatically falls back to `reasoning_content` when `content` is empty (common with DeepSeek V4-series when the token budget is exhausted by the thinking chain), and enforces JSON output via `response_format={"type": "json_object"}` with automatic 400-downgrade retry. If your endpoint rejects `response_format`, the client retries once without it.
 
 ## 📸 AI Identification Pipeline
 
@@ -237,23 +247,25 @@ Response
 ## 🎬 AI Tour Pipeline
 
 ```
-User types: "Summer sky"
+Frontend reads live sky state (visible objects, sun altitude, time, location)
+    ↓
+tour.js.buildPrompt(skyState)      → structured Chinese report ("实时星空观测报告")
     ↓
 POST /api/tour/sessions            → create session
     ↓
-POST /api/tour/sessions/{id}/instruction
+POST /api/tour/sessions/{id}/instruction   (snapshot detected by marker)
     ↓
-llm_client.parse_instruction       → {"intent": "summer_sky", "source": "llm"}
-    ↓  (on any error)
-planner.detect_intent              → keyword fallback
+llm_client._generate_skeleton      → LLM returns 4–6 step JSON skeleton
+    ↓  (if content empty, falls back to reasoning_content)
+llm_client.generate_batch_narration → per-stop narration (short/long/best_time/cultural_story/tip/fun_fact)
     ↓
-planner.build_plan(intent, config) → TourPlan with steps
-    ↓
-astro_utils.annotate_plan          → fill altitude_deg / azimuth_deg per target
+planner.build_plan_from_llm_response → TourPlan Pydantic model
     ↓
 Response { plan, current_step_index: 0 }
     ↓
-Tour UI renders step 1; "下一步" triggers /next
+Tour UI renders step 1; camera flies to target; "下一步" triggers /next
+    ↓  (on any LLM failure)
+tour.js._localPlan(skyState)       → local fallback tour (planets → constellations → DSOs)
 ```
 
 ### Tour API
@@ -261,7 +273,7 @@ Tour UI renders step 1; "下一步" triggers /next
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/tour/sessions` | Create a session |
-| `POST` | `/api/tour/sessions/{id}/instruction` | Submit a natural-language request |
+| `POST` | `/api/tour/sessions/{id}/instruction` | Submit a snapshot report or natural-language request |
 | `POST` | `/api/tour/sessions/{id}/next` | Advance to next step |
 | `POST` | `/api/tour/sessions/{id}/prev` | Go back one step |
 | `POST` | `/api/tour/sessions/{id}/pause` | Pause the tour |
@@ -274,7 +286,7 @@ Tour UI renders step 1; "下一步" triggers /next
 | 3D Renderer | Three.js r128 (custom Alt-Az horizon system) |
 | Backend API | FastAPI + Uvicorn |
 | VL Model | Qwen/Qwen3.8-Flash-Next (overridable via `VL_MODEL`) |
-| Tour LLM | DeepSeek Flash (OpenAI-compatible API) |
+| Tour LLM | DeepSeek Chat / DeepSeek Reasoner (OpenAI-compatible API) |
 | Image Processing | OpenCV + NumPy + Pillow |
 | Plate Solving | Custom RANSAC + ICP (NumPy, complex-number similarity) |
 | Star Catalog | HYG Database v41 |
@@ -307,7 +319,9 @@ This cleanly separates "what is in the image" (VL) from "where is it" (geometry)
 - **One-to-one matching**: greedy assignment by distance ensures each image point is used at most once; this is essential for multi-constellation scenes
 - **Debug images**: with `DEBUG_VISION=1`, saves `*_input.png`, `*_stars.png`, `*_constellations.png`
 - **Central config**: all env vars read once in `VisionConfig` (`vision/config.py`)
-- **Tour LLM** is fully optional: if no key is configured, `planner.detect_intent` handles Chinese/English keyword matching
+- **Tour LLM** is fully optional: if no key is configured, `tour.js._localPlan()` builds a tour from the live sky state
+- **Reasoning models**: `llm_client._post_chat()` normalizes responses by falling back to `reasoning_content` when `content` is empty, and enforces JSON via `response_format` with auto-downgrade on 400. Diagnostic logs print `model / finish / usage / content_len / reasoning_len` for every call
+- **Token budget tuning**: if you switch between reasoning and non-reasoning models, adjust `TOUR_LLM_MAX_TOKENS_*` — reasoning models need 4–10× headroom because the thinking chain consumes the budget before `content` starts
 
 ## 🤝 Contributing
 
@@ -318,6 +332,7 @@ Contributions are welcome! Areas of interest:
 - More tour templates (planets, moon phases, constellation mythology)
 - Mobile-responsive touch controls
 - Multi-language UI support
+- Streaming tour narration (currently waits for full JSON response)
 
 ## 📄 License
 
@@ -330,3 +345,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [ModelScope](https://modelscope.cn) — Qwen-VL model hosting
 - [DeepSeek](https://platform.deepseek.com) — Tour intent LLM
 - [Three.js](https://threejs.org) — WebGL rendering engine
+```
