@@ -3,13 +3,14 @@
  * · 只绑定一次
  * · 点击按钮只打开文件选择框
  * · 选完照片只调用一次 /api/vision/vl-identify
- * · 展示每个簇的星座信息
- * · 引导用户「是/否」把星图切到照片所在画面
+ * · 展示 VL 识别到的星座（中文名 + 英文名 + 缩写 + 置信度 + 理由）
+ * · 显示 plate solve 状态和标注图
  */
 (function () {
   const API = '/api/vision/vl-identify';
 
-  const CLUSTER_COLORS = [
+  // 每个星座按顺序分配的强调色（只用于左侧竖条和缩写文字）
+  const ITEM_COLORS = [
     '#ff3b3b', '#ff8c00', '#ff00b4', '#b400ff',
     '#ffc800', '#00c8ff', '#00dc64', '#ff6464'
   ];
@@ -20,7 +21,6 @@
   let titleEl = null;
   let scale = 1;
   let currentSrc = '';
-  let currentObjectUrl = null;
 
   function el(id) { return document.getElementById(id); }
 
@@ -48,60 +48,6 @@
     btn.disabled = v;
     btn.style.opacity = v ? '0.6' : '1';
     btn.textContent = v ? '⏳ 正在识别…' : '📷 用 AI 识别夜空照片';
-  }
-
-  /* ---------- 坐标格式化 ---------- */
-
-  function fmtRa(raHours) {
-    let h = ((raHours % 24) + 24) % 24;
-    const hh = Math.floor(h);
-    const mm = Math.floor((h - hh) * 60);
-    const ss = Math.round(((h - hh) * 60 - mm) * 60);
-    return String(hh).padStart(2, '0') + 'h ' +
-           String(mm).padStart(2, '0') + 'm ' +
-           String(ss).padStart(2, '0') + 's';
-  }
-
-  function fmtDec(decDeg) {
-    const sign = decDeg >= 0 ? '+' : '−';
-    const a = Math.abs(decDeg);
-    const dd = Math.floor(a);
-    const mm = Math.floor((a - dd) * 60);
-    return sign + String(dd).padStart(2, '0') + '° ' +
-           String(mm).padStart(2, '0') + '′';
-  }
-
-  /* ---------- 3D 视角定位适配层 ---------- */
-
-  function aimSceneAtRaDec(raHours, decDeg) {
-    const s = window.celestialScene;
-    if (!s) {
-      return { ok: false, reason: '3D 场景未初始化，请先在左侧加载 HYG 星表数据' };
-    }
-
-    const raDeg = (((raHours % 24) + 24) % 24) * 15;
-    const dec = Math.max(-89.5, Math.min(89.5, decDeg));
-
-    // 依次尝试常见命名，命中哪个用哪个
-    const candidates = [
-      'lookAtRaDec', 'setViewRaDec', 'aimAtRaDec',
-      'setViewDirection', 'lookAtSky', 'gotoRaDec', 'focusRaDec'
-    ];
-    for (const name of candidates) {
-      if (typeof s[name] === 'function') {
-        try {
-          s[name](raDeg, dec);
-          return { ok: true, method: name };
-        } catch (e) {
-          console.warn('[vision] ' + name + ' 调用失败', e);
-        }
-      }
-    }
-
-    return {
-      ok: false,
-      reason: '当前 3D 场景未提供视角定位接口（需要 scene3d 暴露 lookAtRaDec 等）'
-    };
   }
 
   /* ---------- 弹窗 ---------- */
@@ -155,11 +101,11 @@
     imgEl = modalEl.querySelector('.vm-viewport img');
     titleEl = modalEl.querySelector('.vm-title');
 
-    modalEl.querySelector('#vm-zoom-in').onclick  = () => { scale = clampScale(scale + 0.18); applyScale(); };
-    modalEl.querySelector('#vm-zoom-out').onclick = () => { scale = clampScale(scale - 0.18); applyScale(); };
+    modalEl.querySelector('#vm-zoom-in').onclick    = () => { scale = clampScale(scale + 0.18); applyScale(); };
+    modalEl.querySelector('#vm-zoom-out').onclick   = () => { scale = clampScale(scale - 0.18); applyScale(); };
     modalEl.querySelector('#vm-zoom-reset').onclick = () => { scale = 1; applyScale(); };
-    modalEl.querySelector('#vm-save').onclick = saveImage;
-    modalEl.querySelector('#vm-close').onclick = closeModal;
+    modalEl.querySelector('#vm-save').onclick       = saveImage;
+    modalEl.querySelector('#vm-close').onclick      = closeModal;
 
     modalEl.addEventListener('click', (e) => {
       if (e.target && e.target.dataset && e.target.dataset.vmClose) closeModal();
@@ -218,28 +164,26 @@
     }).catch(() => window.open(currentSrc, '_blank'));
   }
 
-  /* ---------- 结果渲染 ---------- */
+  /* ---------- 结果渲染（只负责详情，不输出 message） ---------- */
 
-  function renderResult(data) {
+  function renderResult(data, constellations) {
     const box = el('photo-results');
     if (!box) return;
 
+    // 一次性覆盖，避免重复
+    box.innerHTML = '';
+
     if (!data.success) {
       box.innerHTML =
-        '<div style="color:#e67e22;font-size:.85rem;">' +
-        escapeHtml(data.message || '识别失败') + '</div>';
+        '<div style="color:#e67e22;font-size:.85rem;line-height:1.5;">' +
+        '识别失败，请查看上方状态提示</div>';
       return;
     }
 
-    const clusters = (data.vl_clusters || data.clusters || []);
-    const items = clusters
-      .map(c => ({ c, vr: (c && c.vl_result) || {} }))
-      .filter(x => x.vr && x.vr.success);
-
-    if (!items.length) {
+    if (!constellations.length) {
       box.innerHTML =
-        '<div style="color:#e67e22;font-size:.85rem;line-height:1.5;">' +
-        escapeHtml(data.message || '未能识别出星座') + '</div>';
+        '<div style="color:#e6a23c;font-size:.85rem;line-height:1.5;">' +
+        '未识别出明确的星座结构</div>';
       return;
     }
 
@@ -249,108 +193,94 @@
     const summary = data.vl_summary || '';
     const region = data.vl_sky_region || '';
     if (summary) {
-      html += '<div style="font-size:.82rem;line-height:1.5;color:#cfe6ff;margin:4px 0 8px;">' +
-        escapeHtml(summary) + '</div>';
+      html +=
+        '<div style="font-size:.82rem;line-height:1.5;color:#cfe6ff;' +
+        'margin:4px 0 6px;">' + escapeHtml(summary) + '</div>';
     }
     if (region) {
-      html += '<div style="font-size:.78rem;color:#8ab4ff;margin-bottom:8px;">🗺 ' +
+      html +=
+        '<div style="font-size:.78rem;color:#8ab4ff;margin-bottom:6px;">🗺 ' +
         escapeHtml(region) + '</div>';
     }
 
-    // ---- 每个簇 ----
+    // ---- plate solve 状态 ----
+    const ps = data.plate_solve || {};
+    if (ps.ok) {
+      const extra = ps.scale_px_per_rad
+        ? ('，scale≈' + Math.round(ps.scale_px_per_rad) + ' px/rad')
+        : '';
+      html +=
+        '<div style="font-size:.74rem;color:#27ae60;margin-bottom:8px;">' +
+        '🎯 天区定位成功（inliers=' + (ps.inliers || 0) + extra + '）</div>';
+    } else {
+      html +=
+        '<div style="font-size:.74rem;color:#e6a23c;margin-bottom:8px;">' +
+        '⚠️ 天区定位未成功，已退回标准投影</div>';
+    }
+
+    // ---- 星座列表 ----
     html += '<div style="display:flex;flex-direction:column;gap:6px;">';
-    for (const { c, vr } of items) {
-      const cid = c.id;
-      const full = vr.constellation_full || vr.constellation || '';
-      const abbr = vr.constellation_abbr || '';
-      const conf = Math.round((vr.confidence || 0) * 100);
-      const isPos = vr.method === 'position-only';
-      const color = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
-      const confColor = conf >= 60 ? '#27ae60' : (conf >= 40 ? '#e6a23c' : '#e67e22');
+    constellations.forEach((c, i) => {
+      const abbr = c.abbr || '';
+      const name = c.name || '';
+      const nameCn = c.name_cn || '';
+      const conf = Math.round((c.confidence || 0) * 100);
+      const color = ITEM_COLORS[i % ITEM_COLORS.length];
+      const confColor = conf >= 60 ? '#27ae60'
+                       : conf >= 40 ? '#e6a23c' : '#e67e22';
+      const low = !!c.low_confidence;
 
       html +=
         '<div style="border-left:3px solid ' + color + ';' +
-        'background:rgba(255,255,255,.03);border-radius:4px;padding:6px 8px;">' +
-          '<div style="display:flex;align-items:center;gap:6px;font-size:.88rem;">' +
-            '<span style="color:' + color + ';font-weight:bold;">C' + cid + '</span>' +
-            '<b style="color:#fff;">' + escapeHtml(full || abbr || '?') + '</b>' +
-            (abbr && full !== abbr
-              ? '<span style="color:#888;font-size:.72rem;">' + escapeHtml(abbr) + '</span>'
+        'background:rgba(255,255,255,.03);border-radius:4px;' +
+        'padding:6px 8px;">' +
+          '<div style="display:flex;align-items:center;gap:6px;' +
+          'font-size:.88rem;flex-wrap:wrap;">' +
+            '<span style="color:' + color + ';font-weight:bold;' +
+            'min-width:34px;">' + escapeHtml(abbr || '?') + '</span>' +
+            (nameCn
+              ? '<b style="color:#fff;">' + escapeHtml(nameCn) + '</b>'
               : '') +
-            '<span style="margin-left:auto;color:' + confColor + ';font-size:.75rem;">' +
-              conf + '%</span>' +
-            (isPos
-              ? '<span style="color:#8ab4ff;font-size:.68rem;padding:1px 5px;' +
-                'border:1px solid rgba(90,160,255,.45);border-radius:8px;">位置推断</span>'
+            (name && name !== nameCn
+              ? '<span style="color:#9cb3c9;font-size:.76rem;">' +
+                escapeHtml(name) + '</span>'
+              : '') +
+            '<span style="margin-left:auto;color:' + confColor +
+            ';font-size:.75rem;">' + conf + '%</span>' +
+            (low
+              ? '<span style="color:#e67e22;font-size:.66rem;' +
+                'padding:1px 5px;border:1px solid rgba(230,126,34,.45);' +
+                'border-radius:8px;">低置信</span>'
               : '') +
           '</div>';
 
-      const shape = vr.shape_description || '';
-      if (shape) {
-        html += '<div style="color:#aaa;font-size:.74rem;margin-top:3px;">形状：' +
-          escapeHtml(shape) + '</div>';
+      if (c.reason) {
+        html +=
+          '<div style="color:#9cb3c9;font-size:.74rem;margin-top:3px;' +
+          'line-height:1.45;">' + escapeHtml(c.reason) + '</div>';
       }
-      const reason = vr.reason || '';
-      if (reason) {
-        html += '<div style="color:#9cb3c9;font-size:.74rem;margin-top:2px;line-height:1.45;">' +
-          escapeHtml(reason) + '</div>';
-      }
-      const edge = vr.edge_note || '';
-      if (edge) {
-        html += '<div style="color:#7a8a99;font-size:.72rem;margin-top:2px;">边缘：' +
-          escapeHtml(edge) + '</div>';
-      }
-      const alts = vr.alternative || [];
-      if (alts.length) {
-        const txt = alts.slice(0, 3).map(a =>
-          (a.name || a.abbr || '?') + ' ' + Math.round((a.confidence || 0) * 100) + '%'
-        ).join('、');
-        html += '<div style="color:#7a8a99;font-size:.72rem;margin-top:2px;">备选：' +
-          escapeHtml(txt) + '</div>';
-      }
+
       html += '</div>';
-    }
+    });
     html += '</div>';
 
-    // ---- 视角切换引导 ----
-    const focus = data.photo_focus || null;
-    if (focus && typeof focus.ra_hours === 'number') {
-      const names = items
-        .map(x => x.vr.constellation_full || x.vr.constellation_abbr)
-        .filter(Boolean);
+    // ---- 标注图按钮 ----
+    const hasConstImg = !!data.constellation_annotated_image;
+    const hasStarImg  = !!data.star_annotated_image;
+    const mainImg     = data.annotated_image || '';
 
+    if (mainImg) {
       html +=
-        '<div id="vision-focus-card" style="margin-top:12px;padding:10px;' +
-        'border-radius:6px;background:rgba(60,120,200,.12);' +
-        'border:1px solid rgba(90,160,255,.35);">' +
-          '<div style="font-size:.85rem;color:#cfe6ff;font-weight:bold;margin-bottom:6px;">' +
-            '🔄 是否把星图切换到照片所在的画面？' +
-          '</div>' +
-          '<div style="font-size:.74rem;color:#9cb3c9;line-height:1.55;margin-bottom:8px;">' +
-            '视角中心将定位到这 ' + items.length + ' 个星座主星的平均位置：<br>' +
-            '<span style="color:#cfe6ff;">' + escapeHtml(names.join('、')) + '</span><br>' +
-            '<span style="color:#8ab4ff;">RA ' + fmtRa(focus.ra_hours) +
-            '  ·  Dec ' + fmtDec(focus.dec_deg) + '</span>' +
-          '</div>' +
-          '<div style="display:flex;gap:8px;">' +
-            '<button id="vision-focus-yes" type="button" ' +
-            'style="flex:1;padding:7px 10px;border:0;border-radius:6px;' +
-            'background:#2d6cdf;color:#fff;cursor:pointer;font-weight:bold;">' +
-            '✅ 是，切换视角</button>' +
-            '<button id="vision-focus-no" type="button" ' +
-            'style="flex:1;padding:7px 10px;border:0;border-radius:6px;' +
-            'background:#2b3a4a;color:#fff;cursor:pointer;">' +
-            '✖ 否，保持当前视角</button>' +
-          '</div>' +
-          '<div id="vision-focus-msg" style="font-size:.72rem;color:#8ab4ff;' +
-          'margin-top:6px;min-height:1em;"></div>' +
-        '</div>';
+        '<button id="btn-view-annotated" class="primary-btn" ' +
+        'style="margin-top:10px;width:100%;" type="button">' +
+        '🔍 查看 / 放大星座标注图</button>';
     }
 
-    if (data.annotated_image) {
-      html += '<button id="btn-view-annotated" class="primary-btn" ' +
-        'style="margin-top:8px;width:100%;" type="button">' +
-        '🔍 查看 / 放大标注图</button>';
+    if (hasStarImg && hasStarImg !== hasConstImg) {
+      html +=
+        '<button id="btn-view-stars" class="primary-btn" ' +
+        'style="margin-top:6px;width:100%;" type="button">' +
+        '⭐ 查看星点图</button>';
     }
 
     box.innerHTML = html;
@@ -360,46 +290,22 @@
     if (viewBtn) {
       viewBtn.onclick = () => {
         openModal(
-          'data:' + (data.annotated_mime || 'image/png') + ';base64,' + data.annotated_image,
-          '识别标注图'
+          'data:' + (data.annotated_mime || 'image/png') + ';base64,' +
+          data.annotated_image,
+          '星座标注图'
         );
       };
     }
-    bindFocusButtons(focus);
-  }
-
-  function bindFocusButtons(focus) {
-    const yes = el('vision-focus-yes');
-    const no  = el('vision-focus-no');
-    const msg = el('vision-focus-msg');
-    if (!yes || !no) return;
-
-    const say = (t, c) => {
-      if (!msg) return;
-      msg.textContent = t;
-      msg.style.color = c || '#8ab4ff';
-    };
-
-    yes.onclick = () => {
-      if (!focus || typeof focus.ra_hours !== 'number') {
-        say('❌ 缺少天球坐标，无法切换', '#e67e22');
-        return;
-      }
-      const r = aimSceneAtRaDec(focus.ra_hours, focus.dec_deg);
-      if (r.ok) {
-        say('✅ 已切换到照片画面（RA ' + fmtRa(focus.ra_hours) +
-            ' / Dec ' + fmtDec(focus.dec_deg) + '）', '#27ae60');
-        yes.disabled = true;
-        yes.style.opacity = '.55';
-        yes.textContent = '✅ 已切换';
-      } else {
-        say('❌ ' + r.reason, '#e74c3c');
-      }
-    };
-
-    no.onclick = () => {
-      say('已保持当前视角。你可以随时回来点击「是，切换视角」。', '#888');
-    };
+    const viewStarsBtn = el('btn-view-stars');
+    if (viewStarsBtn) {
+      viewStarsBtn.onclick = () => {
+        openModal(
+          'data:' + (data.annotated_mime || 'image/png') + ';base64,' +
+          data.star_annotated_image,
+          '星点图'
+        );
+      };
+    }
   }
 
   /* ---------- 识别流程 ---------- */
@@ -415,15 +321,14 @@
     setBusy(true);
     setStatus('正在识别，请稍候…', '#8ab4ff');
 
-    if (currentObjectUrl) {
-      URL.revokeObjectURL(currentObjectUrl);
-      currentObjectUrl = null;
-    }
-    currentObjectUrl = URL.createObjectURL(file);
-
     const preview = el('photo-preview');
     if (preview) {
-      preview.src = currentObjectUrl;
+      if (preview.dataset && preview.dataset.url) {
+        URL.revokeObjectURL(preview.dataset.url);
+      }
+      const url = URL.createObjectURL(file);
+      preview.dataset.url = url;
+      preview.src = url;
       preview.style.display = 'block';
     }
 
@@ -436,30 +341,42 @@
       const data = await res.json();
       console.log('[vision] 后端返回', data);
 
-      renderResult(data);
+      const constellations = Array.isArray(data.constellations)
+        ? data.constellations
+        : [];
 
-      const items = (data.vl_clusters || [])
-        .filter(c => c && c.vl_result && c.vl_result.success);
+      // 渲染详情（不含 message）
+      renderResult(data, constellations);
 
-      if (data.success && items.length) {
-        setStatus('识别完成，共 ' + items.length + ' 个星座', '#27ae60');
+      // 状态只在这里设置一次
+      if (data.success && constellations.length) {
+        setStatus('识别完成，共 ' + constellations.length + ' 个星座', '#27ae60');
 
-        if (window.celestialScene && window.celestialScene.highlightIdentified) {
-          window.celestialScene.highlightIdentified(data.matched_stars || []);
+        if (window.celestialScene &&
+            typeof window.celestialScene.highlightIdentified === 'function') {
+          try {
+            window.celestialScene.highlightIdentified(data.matched_stars || []);
+          } catch (e) {
+            console.warn('[vision] highlightIdentified 调用失败', e);
+          }
         }
 
         if (data.annotated_image) {
           openModal(
-            'data:' + (data.annotated_mime || 'image/png') + ';base64,' + data.annotated_image,
-            '识别标注图'
+            'data:' + (data.annotated_mime || 'image/png') + ';base64,' +
+            data.annotated_image,
+            '星座标注图'
           );
         }
+      } else if (data.success) {
+        setStatus(data.message || '未能识别出星座', '#e6a23c');
       } else {
-        setStatus(data.message || '未能识别', '#e67e22');
+        setStatus(data.message || '识别失败', '#e74c3c');
       }
     } catch (err) {
       console.error('[vision] 请求失败', err);
       setStatus('请求失败: ' + err.message, '#e74c3c');
+      renderResult({ success: false }, []);
     } finally {
       busy = false;
       setBusy(false);
@@ -468,7 +385,7 @@
     }
   }
 
-  /* ---------- 绑定 ---------- */
+  /* ---------- 绑定（防重复） ---------- */
 
   document.addEventListener('DOMContentLoaded', () => {
     console.log('[vision] vision.js loaded');
@@ -481,7 +398,7 @@
       return;
     }
 
-    // 防重复绑定：克隆替换
+    // 克隆替换：确保本次加载的 listener 生效，旧的被丢弃
     const cleanBtn = btn.cloneNode(true);
     btn.parentNode.replaceChild(cleanBtn, btn);
     btn = el('btn-photo-identify');

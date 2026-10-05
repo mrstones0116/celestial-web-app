@@ -1,8 +1,3 @@
-"""
-tour 模块的自然语言解析。
-优先调用 LLM，失败时自动回退到关键词识别。
-支持通过环境变量灵活配置 DeepSeek API。
-"""
 from __future__ import annotations
 import json
 import os
@@ -10,7 +5,9 @@ import re
 from typing import Any, Dict, List, Optional
 import httpx
 
-# ---------------- 配置（运行时读取） ----------------
+
+# ==================== 环境配置 ====================
+
 def _get_api_url() -> str:
     return os.getenv(
         "TOUR_LLM_API_URL",
@@ -31,7 +28,7 @@ def _get_model() -> str:
     return (
         os.getenv("TOUR_LLM_MODEL")
         or os.getenv("DEEPSEEK_MODEL")
-        or "deepseek-flash"
+        or "deepseek-chat"
     ).strip()
 
 
@@ -41,15 +38,45 @@ def _llm_enabled() -> bool:
 
 def _llm_timeout() -> float:
     try:
-        return float(os.getenv("TOUR_LLM_TIMEOUT", "15"))
+        return float(os.getenv("TOUR_LLM_TIMEOUT", "120"))
     except Exception:
-        return 15.0
+        return 120.0
 
 
-# ---------------- 意图白名单（扩展） ----------------
+# ★ Token 预算（可通过环境变量覆盖，默认给推理模型留足空间）
+def _max_tokens_parse() -> int:
+    try:
+        return int(os.getenv("TOUR_LLM_MAX_TOKENS_PARSE", "4000"))
+    except Exception:
+        return 4000
+
+
+def _max_tokens_narration() -> int:
+    try:
+        return int(os.getenv("TOUR_LLM_MAX_TOKENS_NARRATION", "8000"))
+    except Exception:
+        return 8000
+
+
+def _max_tokens_batch() -> int:
+    try:
+        return int(os.getenv("TOUR_LLM_MAX_TOKENS_BATCH", "32000"))
+    except Exception:
+        return 32000
+
+
+def _max_tokens_skeleton() -> int:
+    try:
+        return int(os.getenv("TOUR_LLM_MAX_TOKENS_SKELETON", "64000"))
+    except Exception:
+        return 64000
+
+
+# ==================== 意图识别 ====================
+
 ALLOWED_INTENTS = {
-    "what_visible",       # ✅ 新增：现在能看到什么
-    "recommend_order",    # ✅ 新增：推荐观测顺序
+    "what_visible",
+    "recommend_order",
     "summer_sky",
     "winter_sky",
     "messier_marathon",
@@ -67,7 +94,6 @@ bright_star_tour：用户想看最亮的恒星、亮星巡礼等。
 default：无法判断或用户没给明确偏好，用入门路线。
 """.strip()
 
-# ---------------- Prompt ----------------
 _SYSTEM_PROMPT = f"""你是一个专业的天文导览助手，不仅要识别用户意图，还要提取关键信息。
 
 用户会用自然语言描述他们想看的星空内容。
@@ -94,16 +120,15 @@ _SYSTEM_PROMPT = f"""你是一个专业的天文导览助手，不仅要识别�
 如果完全无法判断，intent 填 "default"，confidence 填 0.0，entities 留空。
 """
 
-# ==================== 工具函数（增强版） ====================
+
+# ==================== JSON 提取 ====================
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _strip_fence(text: str) -> str:
     t = str(text).strip()
-    # 处理 ```json ... ``` 或 ``` ... ```
     if "```" in t:
-        # 提取 ``` 之间的内容
         parts = t.split("```")
         for part in parts:
             part = part.strip()
@@ -117,13 +142,11 @@ def _strip_fence(text: str) -> str:
 def _extract_json(text: str) -> Dict[str, Any]:
     t = _strip_fence(text)
 
-    # 1) 直接尝试解析
     try:
         return json.loads(t)
     except Exception:
         pass
 
-    # 2) 正则提取 {...}
     m = _JSON_RE.search(t)
     if m:
         try:
@@ -131,13 +154,10 @@ def _extract_json(text: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 3) ✅ 新增：尝试修复被截断的 JSON（补全缺失的括号）
     candidate = t
     if candidate.startswith("{") and not candidate.endswith("}"):
-        # 计算未闭合的括号数量
         open_count = candidate.count("{") - candidate.count("}")
         if open_count > 0:
-            # 尝试截断到最后一个完整的键值对
             last_quote = candidate.rfind('"')
             if last_quote > 0:
                 candidate = candidate[:last_quote + 1] + "}" * open_count
@@ -148,7 +168,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # 4) ✅ 新增：尝试提取 "intent" 字段作为最后兜底
     intent_match = re.search(r'"intent"\s*:\s*"([^"]+)"', t)
     if intent_match:
         return {
@@ -160,8 +179,8 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
     raise ValueError(f"无法从 LLM 响应里提取 JSON: {text[:200]}")
 
+
 def _fallback(text: str, reason: str = "") -> Dict[str, Any]:
-    """调用 planner 的关键词识别兜底。延迟导入避免循环依赖。"""
     try:
         from .planner import detect_intent as _kw
     except Exception as e:
@@ -180,6 +199,121 @@ def _fallback(text: str, reason: str = "") -> Dict[str, Any]:
         kw["reason"] = reason
     return kw
 
+
+# ==================== 通用请求封装 ====================
+
+async def _post_chat(
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: int,
+    temperature: float = 0.7,
+    timeout: Optional[float] = None,
+    json_mode: bool = False,
+    tag: str = "LLM",
+) -> Optional[Dict[str, Any]]:
+    """
+    统一的 chat/completions 请求封装。
+    返回原始响应 dict，失败返回 None。
+    会打印诊断日志（model / finish / usage / content_len / reasoning_len）。
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        print(f"[tour][{tag}] 未配置 API Key")
+        return None
+
+    payload: Dict[str, Any] = {
+        "model": _get_model(),
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if json_mode:
+        # ★ 部分兼容层不支持 response_format，报 400 时请注释掉下面这一行
+        payload["response_format"] = {"type": "json_object"}
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    to = timeout if timeout is not None else _llm_timeout()
+
+    try:
+        async with httpx.AsyncClient(timeout=to) as client:
+            resp = await client.post(_get_api_url(), json=payload, headers=headers)
+
+            # ★ 若 json_mode 请求被拒，自动降级重试一次（去掉 response_format）
+            if resp.status_code == 400 and json_mode:
+                body_lower = (resp.text or "").lower()
+                if "response_format" in body_lower or "json_object" in body_lower:
+                    print(f"[tour][{tag}] response_format 不被支持，降级重试")
+                    payload.pop("response_format", None)
+                    resp = await client.post(
+                        _get_api_url(), json=payload, headers=headers
+                    )
+
+            resp.raise_for_status()
+            data = resp.json()
+
+        # ===== 诊断区 =====
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message", {}) or {}
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or ""
+        finish = choice.get("finish_reason", "")
+        usage = data.get("usage", {})
+        model_used = data.get("model", "?")
+
+        print(
+            f"[tour][{tag}] model={model_used} finish={finish} "
+            f"usage={usage} content_len={len(content)} reasoning_len={len(reasoning)}"
+        )
+
+        # content 空但 reasoning 有内容：兜底（你的 prompt 要求 JSON，reasoning 末尾常带 JSON）
+        if not content and reasoning:
+            print(f"[tour][{tag}] content 为空，改用 reasoning_content 兜底")
+            content = reasoning
+
+        if not content:
+            print(f"[tour][{tag}] ⚠️ content 与 reasoning 均为空，原始响应：{str(data)[:800]}")
+            return None
+
+        if finish == "length":
+            print(f"[tour][{tag}] ⚠️ 响应被截断（max_tokens={max_tokens}）")
+
+        # 归一化：把 content 塞回 msg，便于调用方直接取
+        msg["content"] = content
+        choice["message"] = msg
+        data["choices"] = [choice]
+        return data
+
+    except httpx.TimeoutException:
+        print(f"[tour][{tag}] ⚠️ 超时（>{to}s）")
+        return None
+    except httpx.HTTPStatusError as e:
+        body = e.response.text[:300] if e.response is not None else ""
+        print(f"[tour][{tag}] ⚠️ HTTP {e.response.status_code}: {body}")
+        return None
+    except Exception as e:
+        import traceback
+        print(f"[tour][{tag}] ⚠️ 调用失败: {e}")
+        traceback.print_exc()
+        return None
+
+
+def _normalize_content(raw: Any) -> str:
+    """兼容 content 是数组（多模态返回）的情况。"""
+    if isinstance(raw, list):
+        return " ".join(
+            p.get("text", "")
+            for p in raw
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return str(raw or "")
+
+
+# ==================== 意图解析 ====================
+
 async def parse_instruction(text: str) -> Dict[str, Any]:
     text = (text or "").strip()
     if not text:
@@ -191,78 +325,53 @@ async def parse_instruction(text: str) -> Dict[str, Any]:
             "entities": {},
         }
 
-    # ✅ 移除关键词优先逻辑，所有请求都走 LLM
     if not _llm_enabled():
         return _fallback(text, "LLM 已通过 TOUR_LLM_ENABLED=0 关闭")
 
-    api_key = _get_api_key()
-    if not api_key:
+    if not _get_api_key():
         return _fallback(text, "未配置 TOUR_LLM_API_KEY / DEEPSEEK_API_KEY")
 
-    payload = {
-        "model": _get_model(),
-        "messages": [
+    data = await _post_chat(
+        messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
-        "max_tokens": 512,
-        "temperature": 0.0,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    timeout = _llm_timeout()
+        max_tokens=_max_tokens_parse(),
+        temperature=0.0,
+        json_mode=True,
+        tag="parse",
+    )
+    if not data:
+        return _fallback(text, "LLM 请求失败或返回空")
 
+    raw = _normalize_content(data["choices"][0]["message"].get("content", ""))
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(_get_api_url(), json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-        raw = data["choices"][0]["message"]["content"]
-        if isinstance(raw, list):
-            raw = " ".join(
-                p.get("text", "")
-                for p in raw
-                if isinstance(p, dict) and p.get("type") == "text"
-            )
-
-        finish_reason = data["choices"][0].get("finish_reason", "")
-        if finish_reason == "length":
-            print(f"[tour] ⚠️ LLM 响应被截断 (max_tokens=512)")
-
-        parsed = _extract_json(str(raw))
-        intent = str(parsed.get("intent", "")).strip().lower()
-
-        try:
-            confidence = float(parsed.get("confidence", 0.0))
-        except Exception:
-            confidence = 0.0
-
-        reason = str(parsed.get("reason", ""))
-        entities = parsed.get("entities", {}) or {}
-
-        if intent not in ALLOWED_INTENTS:
-            return _fallback(text, f"LLM 返回未知意图: {intent}")
-
-        return {
-            "intent": intent,
-            "confidence": max(0.0, min(1.0, confidence)),
-            "reason": reason,
-            "source": "llm",       # ✅ 始终标记为 llm
-            "entities": entities,  # ✅ 始终包含 LLM 提取的实体
-        }
-
-    except httpx.TimeoutException:
-        return _fallback(text, f"LLM 超时（>{timeout}s）")
-    except httpx.HTTPStatusError as e:
-        body = e.response.text[:120] if e.response is not None else ""
-        return _fallback(text, f"LLM HTTP {e.response.status_code}: {body}")
+        parsed = _extract_json(raw)
     except Exception as e:
-        return _fallback(text, f"LLM 调用失败: {e}")
+        return _fallback(text, f"JSON 解析失败: {e}")
 
-# ==================== ✅ 新增：LLM 动态解说生成 ====================
+    intent = str(parsed.get("intent", "")).strip().lower()
+    try:
+        confidence = float(parsed.get("confidence", 0.0))
+    except Exception:
+        confidence = 0.0
+
+    reason = str(parsed.get("reason", ""))
+    entities = parsed.get("entities", {}) or {}
+
+    if intent not in ALLOWED_INTENTS:
+        return _fallback(text, f"LLM 返回未知意图: {intent}")
+
+    return {
+        "intent": intent,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reason": reason,
+        "source": "llm",
+        "entities": entities,
+    }
+
+
+# ==================== 单颗解说 ====================
 
 async def generate_narration(
     target_name: str,
@@ -270,18 +379,14 @@ async def generate_narration(
     user_style: str = "story",
     locale: str = "zh-CN",
 ) -> Dict[str, str]:
-    """
-    为单个天体生成个性化解说。
-    返回 {"short": "...", "long": "...", "fun_fact": "...", "observation_tip": "..."}
-    """
-    api_key = _get_api_key()
-    if not api_key:
-        return {
-            "short": target_name,
-            "long": f"{target_name}是一颗值得观测的天体。",
-            "fun_fact": None,
-            "observation_tip": "抬头寻找最亮的那颗。",
-        }
+    fallback = {
+        "short": target_name,
+        "long": f"{target_name}是一颗值得观测的天体。",
+        "fun_fact": None,
+        "observation_tip": "抬头寻找最亮的那颗。",
+    }
+    if not _get_api_key():
+        return fallback
 
     style_desc = {
         "story": "用浪漫的神话故事或传说来讲解",
@@ -304,47 +409,34 @@ async def generate_narration(
 
 只输出 JSON，不要 markdown。"""
 
-    payload = {
-        "model": _get_model(),
-        "messages": [
+    data = await _post_chat(
+        messages=[
             {"role": "system", "content": "你是天文解说专家，输出必须为纯 JSON。"},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 512,
-        "temperature": 0.7,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+        max_tokens=_max_tokens_narration(),
+        temperature=0.7,
+        json_mode=True,
+        tag="narr",
+    )
+    if not data:
+        return fallback
 
+    raw = _normalize_content(data["choices"][0]["message"].get("content", ""))
     try:
-        async with httpx.AsyncClient(timeout=_llm_timeout()) as client:
-            resp = await client.post(_get_api_url(), json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-        raw = data["choices"][0]["message"]["content"]
-        if isinstance(raw, list):
-            raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict))
-
-        parsed = _extract_json(str(raw))
-        return {
-            "short": str(parsed.get("short", target_name)),
-            "long": str(parsed.get("long", "")),
-            "fun_fact": parsed.get("fun_fact"),
-            "observation_tip": str(parsed.get("observation_tip", "")),
-        }
+        parsed = _extract_json(raw)
     except Exception:
-        # 生成失败时返回基础版本
-        return {
-            "short": target_name,
-            "long": f"{target_name}是夜空中一个有趣的目标。",
-            "fun_fact": None,
-            "observation_tip": "抬头寻找最亮的那颗。",
-        }
-        
-# ==================== ✅ 新增：批量生成导览解说 ====================
+        return fallback
+
+    return {
+        "short": str(parsed.get("short", target_name)),
+        "long": str(parsed.get("long", "")),
+        "fun_fact": parsed.get("fun_fact"),
+        "observation_tip": str(parsed.get("observation_tip", "")),
+    }
+
+
+# ==================== 批量解说 ====================
 
 async def generate_batch_narration(
     stars_info: List[Dict[str, Any]],
@@ -352,18 +444,8 @@ async def generate_batch_narration(
     user_style: str = "story",
     locale: str = "zh-CN",
 ) -> List[Dict[str, str]]:
-    """
-    一次性为多颗星生成个性化解说。
-    返回与 stars_info 等长的列表，每项包含:
-    {
-      "short", "long", "best_time", "cultural_story",
-      "observation_tip", "fun_fact"
-    }
-    """
-    api_key = _get_api_key()
     count = len(stars_info)
 
-    # LLM 不可用时的兜底模板
     def _fallback_all():
         return [
             {
@@ -377,10 +459,11 @@ async def generate_batch_narration(
             for s in stars_info
         ]
 
-    if not api_key:
+    if count == 0:
+        return []
+    if not _get_api_key():
         return _fallback_all()
 
-    # 构建星表摘要
     stars_text = ""
     for i, s in enumerate(stars_info):
         stars_text += (
@@ -407,9 +490,9 @@ async def generate_batch_narration(
 请为每颗星生成以下 6 个字段：
 - short：一句话介绍（不超过25字）
 - long：详细讲解（80-120字），包含这颗星的物理特征（颜色、距离、光谱型等）
-- best_time：今晚最佳观测时段（如"21:00-23:00"或"整晚可见"），根据当前高度角和运动趋势判断
-- cultural_story：与该星相关的文化典故、神话故事或历史轶事（50-100字）。如果没有著名典故，填 null
-- observation_tip：实用观测建议（如何用肉眼找到它、用什么设备看更好）
+- best_time：今晚最佳观测时段（如"21:00-23:00"或"整晚可见"）
+- cultural_story：与该星相关的文化典故、神话故事或历史轶事（50-100字）。没有著名典故则填 null
+- observation_tip：实用观测建议
 - fun_fact：一个有趣的冷知识（可选，没有填 null）
 
 风格要求：{style_desc}
@@ -430,57 +513,148 @@ async def generate_batch_narration(
 
 数组长度必须等于 {count}。"""
 
-    payload = {
-        "model": _get_model(),
-        "messages": [
+    data = await _post_chat(
+        messages=[
             {"role": "system", "content": "你是天文导览专家，输出必须为纯 JSON 数组。"},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 2048,
-        "temperature": 0.7,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+        max_tokens=_max_tokens_batch(),
+        temperature=0.7,
+        json_mode=True,
+        tag="batch",
+    )
+    if not data:
+        return _fallback_all()
+
+    raw = _normalize_content(data["choices"][0]["message"].get("content", ""))
+    text = _strip_fence(raw)
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(_get_api_url(), json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-        raw = data["choices"][0]["message"]["content"]
-        if isinstance(raw, list):
-            raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict))
-
-        # 提取 JSON 数组
-        text = _strip_fence(str(raw))
-        # 尝试直接解析
-        try:
-            result = json.loads(text)
-        except Exception:
-            # 尝试提取 [...] 部分
-            m = re.search(r"\[.*\]", text, re.DOTALL)
-            if m:
+        result = json.loads(text)
+    except Exception:
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            try:
                 result = json.loads(m.group(0))
-            else:
+            except Exception:
                 return _fallback_all()
+        else:
+            return _fallback_all()
 
-        if not isinstance(result, list) or len(result) != count:
-            # 数量不匹配时，尽量对齐
-            fallback = _fallback_all()
-            for i in range(min(len(result), count)):
-                if isinstance(result[i], dict):
-                    fallback[i].update({
-                        k: result[i].get(k) for k in
-                        ["short", "long", "best_time", "cultural_story", "observation_tip", "fun_fact"]
-                        if result[i].get(k) is not None
-                    })
-            return fallback
+    if not isinstance(result, list) or len(result) != count:
+        fallback = _fallback_all()
+        for i in range(min(len(result), count)):
+            if isinstance(result[i], dict):
+                fallback[i].update({
+                    k: result[i].get(k) for k in
+                    ["short", "long", "best_time", "cultural_story",
+                     "observation_tip", "fun_fact"]
+                    if result[i].get(k) is not None
+                })
+        return fallback
 
-        return result
+    return result
 
+
+# ==================== 快照导览骨架 ====================
+
+# ★ Prompt 精简：去掉"硬性规则"措辞，减少推理模型的防御性思考；
+#   末尾"直接开始写 {"对推理模型特别有效，能把它拉到输出阶段。
+_SKELETON_SYSTEM_PROMPT = """你是天文导览规划师。根据用户给出的实时星空可见天体清单，规划 4-6 站的观览骨架。
+
+只输出 JSON，不要 markdown，不要解释，不要思考过程。直接开始写 {。
+
+JSON 格式：
+{"title":"...","description":"...","steps":[{"title":"...","targets":[{"name_zh":"...","name_en":"...","type":"star","ra_deg":0,"dec_deg":0,"magnitude":0,"constellation":"...","altitude_deg":0}],"camera":{"center_ra_deg":0,"center_dec_deg":0,"fov_deg":30}}]}
+
+规则：
+1. 只用清单里的天体，禁止推荐地平线以下的。
+2. 每步只放 1 个 target。
+3. camera.center_ra_deg / center_dec_deg 必须与 target 的 ra_deg / dec_deg 一致。
+4. type 只能是：star / planet / moon / messier / ngc / constellation。
+"""
+
+
+async def _generate_skeleton(snapshot_prompt: str) -> Optional[Dict[str, Any]]:
+    if not _get_api_key():
+        print("[tour] 未配置 LLM API Key，跳过快照导览")
+        return None
+
+    data = await _post_chat(
+        messages=[
+            {"role": "system", "content": _SKELETON_SYSTEM_PROMPT},
+            {"role": "user", "content": snapshot_prompt},
+        ],
+        max_tokens=_max_tokens_skeleton(),
+        temperature=0.3,
+        timeout=180.0,           # ★ 骨架生成单独给 180s
+        json_mode=True,
+        tag="skeleton",
+    )
+    if not data:
+        return None
+
+    raw = _normalize_content(data["choices"][0]["message"].get("content", ""))
+    try:
+        parsed = _extract_json(raw)
     except Exception as e:
-        print(f"[tour] 批量解说生成失败: {e}")
-        return _fallback_all()
+        print(f"[tour][skeleton] JSON 解析失败: {e}")
+        return None
+
+    if not isinstance(parsed, dict):
+        print(f"[tour][skeleton] 返回非 dict: {type(parsed)}")
+        return None
+    if not isinstance(parsed.get("steps"), list) or not parsed["steps"]:
+        print(f"[tour][skeleton] 缺少 steps: {str(parsed)[:200]}")
+        return None
+
+    return parsed
+
+
+async def generate_tour_plan_from_snapshot(
+    snapshot_prompt: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    skeleton = await _generate_skeleton(snapshot_prompt)
+    if not skeleton:
+        return None
+
+    steps = skeleton.get("steps") or []
+
+    valid_targets: List[Dict[str, Any]] = []
+    for s in steps:
+        ts = s.get("targets") or []
+        t = ts[0] if ts else None
+        if isinstance(t, dict) and (t.get("name_zh") or t.get("name_en")):
+            valid_targets.append({
+                "name_zh": t.get("name_zh") or t.get("name_en") or "",
+                "name_en": t.get("name_en") or t.get("name_zh") or "",
+                "constellation": t.get("constellation") or "",
+                "magnitude": t.get("magnitude"),
+                "altitude_deg": t.get("altitude_deg"),
+                "azimuth_deg": t.get("azimuth_deg"),
+            })
+
+    if valid_targets:
+        try:
+            narrations = await generate_batch_narration(
+                stars_info=valid_targets,
+                location_summary="香港",
+                user_style="story",
+                locale="zh-CN",
+            )
+            for i, s in enumerate(steps):
+                if i < len(narrations) and isinstance(narrations[i], dict):
+                    n = narrations[i]
+                    s["narration"] = {
+                        "long": n.get("long") or "",
+                        "best_time": n.get("best_time"),
+                        "cultural_story": n.get("cultural_story"),
+                        "observation_tip": n.get("observation_tip"),
+                        "fun_fact": n.get("fun_fact"),
+                    }
+            print(f"[tour] ✅ 骨架 {len(steps)} 步，已生成 {len(narrations)} 段解说")
+        except Exception as e:
+            print(f"[tour] ⚠️ 批量解说生成失败，使用模板兜底: {e}")
+
+    return skeleton

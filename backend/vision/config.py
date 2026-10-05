@@ -53,4 +53,4 @@ class VisionConfig:
     VL_MAX_RETRIES = _env("VISION_VL_MAX_RETRIES", 4, int)
     VL_MAX_TOKENS  = _env("VISION_VL_MAX_TOKENS", 4000, int)
 
-    DEBUG_VISION = _env("DEBUG_VISION", 0, int) == 1
+    DEBUG_VISION = _env("DEBUG_VISION", 0, int) == 0

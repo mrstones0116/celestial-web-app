@@ -97,14 +97,12 @@
         <div id="photo-results" style="margin-top:8px;max-height:320px;overflow-y:auto;"></div>
     </div>
 
-    <!-- ★★★ 星空导览（AI Tour）面板 ★★★ -->
+    <!-- ★★★ 智能星空导览（AI Tour，无需用户输入）★★★ -->
     <div class="panel">
-        <h3>🎬 星空导览</h3>
-        <div class="search-row">
-            <input type="text" id="tour-input"
-                   placeholder="例如：我想看夏季星空 / 冬季星空"
-                   autocomplete="off">
-            <button id="tour-start">开始</button>
+        <h3>🎬 智能星空导览</h3>
+        <div id="tour-context" class="status-text">⏳ 等待星表数据…</div>
+        <div class="time-controls" style="margin-top:8px;">
+            <button id="tour-auto" class="primary-btn">🔭 按当前星空重新生成</button>
         </div>
         <div id="tour-status" class="status-text"></div>
 
@@ -114,7 +112,7 @@
             <div id="tour-narration"
                  style="font-size:12px; line-height:1.6; margin-bottom:10px; opacity:0.9;"></div>
 
-            <!-- ✅ 新增：目标星列表 + 导航按钮 -->
+            <!-- 目标星列表 + 导航按钮 -->
             <div id="tour-targets"></div>
 
             <div class="time-controls">

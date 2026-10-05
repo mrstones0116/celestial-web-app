@@ -159,6 +159,8 @@ async function loadData() {
             setTimeout(() => {
                 if (scene3d && scene3d.refreshConstellationInfo) scene3d.refreshConstellationInfo();
             }, 150);
+
+            
         } else {
             if (statusEl) {
                 statusEl.textContent = `❌ ${data.message}`;

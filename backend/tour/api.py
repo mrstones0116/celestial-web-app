@@ -10,6 +10,18 @@ from .schemas import (
     ChatResponse,
     TourTarget,
 )
+from .planner import (
+    build_plan,
+    build_dynamic_plan,
+    detect_intent,
+    build_plan_from_llm_response,   # ✅ 新增
+)
+from .llm_client import (
+    parse_instruction,
+    generate_narration,
+    generate_batch_narration,
+    generate_tour_plan_from_snapshot,   # ✅ 新增
+)
 from .session_store import tour_store
 from .planner import build_plan, build_dynamic_plan, detect_intent
 from .llm_client import parse_instruction, generate_narration, generate_batch_narration
@@ -46,6 +58,24 @@ def _load_session(session_id: str) -> dict:
         raise HTTPException(404, "会话不存在")
     return session
 
+# 前端 buildPrompt() 输出的报告里必然包含这个标志串
+_SNAPSHOT_MARKER = "实时星空观测报告"
+
+
+async def _build_snapshot_plan(prompt_text: str, config: dict):
+    """
+    「实时星空快照」专用通道：
+    跳过关键词意图识别，直接让 LLM 生成完整 TourPlan。
+    返回 TourPlan 或 None（失败时前端会自动回退到本地兜底导览）。
+    """
+    data = await generate_tour_plan_from_snapshot(prompt_text, config)
+    if not data:
+        print("[tour] 快照导览：LLM 未返回有效 JSON")
+        return None
+    plan = build_plan_from_llm_response(data, config)
+    if plan is None:
+        print("[tour] 快照导览：JSON 转换 TourPlan 失败")
+    return plan
 
 # ==================== 会话管理 ====================
 
@@ -125,10 +155,57 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
     if session["status"] == "stopped":
         return {"status": "stopped"}
 
+    config = session.get("config", {})
+
+    # ============================================================
+    # ★ 快照通道：前端发来的「实时星空观测报告」→ LLM 直接产完整计划
+    # ============================================================
+    if _SNAPSHOT_MARKER in (req.text or ""):
+        print(f"[tour] 检测到实时星空快照提示（长度 {len(req.text)}），走专用通道")
+        plan = await _build_snapshot_plan(req.text, config)
+
+        if plan is None:
+            # 让前端拿到可识别的失败信号，它会自动降级到本地兜底
+            return TourSessionResponse(
+                session_id=session_id,
+                status="empty",
+                plan=None,
+                current_step_index=0,
+                message="AI 暂时无法生成导览，请稍后重试（已自动降级）",
+            ).model_dump()
+
+        history = list(session.get("history", []))
+        history.append("[实时星空快照]")
+
+        tour_store.update(session_id, {
+            "status": "ready",
+            "plan": plan.model_dump(),
+            "current_step_index": 0,
+            "history": history,
+            "last_intent": {
+                "intent": "sky_snapshot",
+                "source": "llm",
+                "confidence": 1.0,
+                "entities": {},
+            },
+        })
+
+        print(f"[tour] ✅ 快照导览已生成：{len(plan.steps)} 步")
+        return TourSessionResponse(
+            session_id=session_id,
+            status="ready",
+            plan=plan,
+            current_step_index=0,
+            message=f"导览已生成（{len(plan.steps)} 步）",
+        ).model_dump()
+
+    # ============================================================
+    # 以下为原有逻辑（用户自然语言指令），完全保留
+    # ============================================================
     parsed = await parse_instruction(req.text)
     intent = parsed["intent"]
     entities = parsed.get("entities", {})
-    
+
     print(
         f"[tour] intent={intent} "
         f"source={parsed.get('source')} "
@@ -138,6 +215,8 @@ async def submit_instruction(session_id: str, req: InstructionRequest):
     )
 
     loader = _get_loader()
+    # ⚠️ 注意：原来这里有一行 `config = session.get("config", {})`
+    #    因为上面已经定义了 config，这里删掉该行避免重复赋值
     config = session.get("config", {})
 
     # ✅ 时间处理：如果提到“现在/今晚/明早”等，强制使用实时/近期时间

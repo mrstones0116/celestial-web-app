@@ -237,3 +237,146 @@ def build_plan(intent: str, config: Optional[dict] = None) -> TourPlan:
 
     annotate_plan(plan, config)
     return plan
+
+# ==================== ✅ 新增：LLM JSON → TourPlan ====================
+
+def _safe_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_ALLOWED_TARGET_TYPES = {
+    "star", "constellation", "messier", "ngc",
+    "planet", "moon", "asterism",
+}
+
+
+def build_plan_from_llm_response(
+    data: Dict[str, Any],
+    config: Optional[dict] = None,
+) -> Optional[TourPlan]:
+    """
+    将 LLM 返回的 JSON（含 title/description/steps）转换为 TourPlan。
+    数据不足或全部无效时返回 None，调用方应回退到本地兜底计划。
+    """
+    if not isinstance(data, dict):
+        return None
+    steps_raw = data.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        return None
+
+    config = config or {}
+    location = config.get("location") or {}
+    lat = location.get("latitude", 22.3193)
+    lon = location.get("longitude", 114.1694)
+
+    steps: List[TourStep] = []
+
+    for i, s in enumerate(steps_raw):
+        if not isinstance(s, dict):
+            continue
+
+        # ---------- targets ----------
+        targets: List[TourTarget] = []
+        for t in (s.get("targets") or []):
+            if not isinstance(t, dict):
+                continue
+            name_zh = str(t.get("name_zh") or t.get("name_en") or "").strip()
+            name_en = str(t.get("name_en") or "").strip()
+            if not name_zh and not name_en:
+                continue
+            if not name_zh:
+                name_zh = name_en
+            if not name_en:
+                name_en = name_zh
+
+            tid = name_en or name_zh or f"t_{i}_{len(targets)}"
+            ttype = str(t.get("type") or "star").strip().lower()
+            if ttype not in _ALLOWED_TARGET_TYPES:
+                ttype = "star"
+
+            targets.append(TourTarget(
+                type=ttype,
+                id=tid,
+                hyg_id=tid,
+                name_zh=name_zh,
+                name_en=name_en,
+                constellation=t.get("constellation"),
+                ra_deg=_safe_float(t.get("ra_deg")),
+                dec_deg=_safe_float(t.get("dec_deg")),
+                magnitude=_safe_float(t.get("magnitude")),
+                altitude_deg=_safe_float(t.get("altitude_deg")),
+                azimuth_deg=_safe_float(t.get("azimuth_deg")),
+                is_visible=True,
+            ))
+
+        if not targets:
+            # 没有有效目标的步骤直接丢弃
+            continue
+
+        # ---------- camera ----------
+        cam_raw = s.get("camera") or {}
+        center_ra = _safe_float(cam_raw.get("center_ra_deg"))
+        center_dec = _safe_float(cam_raw.get("center_dec_deg"))
+        if center_ra is None:
+            center_ra = targets[0].ra_deg or 0.0
+        if center_dec is None:
+            center_dec = targets[0].dec_deg or 0.0
+        fov = _safe_float(cam_raw.get("fov_deg")) or 30.0
+
+        # ---------- narration ----------
+        narr_raw = s.get("narration") or {}
+        if not isinstance(narr_raw, dict):
+            narr_raw = {}
+
+        narration = Narration(
+            short=str(narr_raw.get("short") or targets[0].name_zh or ""),
+            long=str(narr_raw.get("long") or s.get("title") or ""),
+            best_time=narr_raw.get("best_time"),
+            cultural_story=narr_raw.get("cultural_story"),
+            observation_tip=narr_raw.get("observation_tip"),
+            fun_fact=narr_raw.get("fun_fact"),
+        )
+
+        # ---------- estimated_minutes ----------
+        try:
+            minutes = int(s.get("estimated_minutes") or 3)
+        except (TypeError, ValueError):
+            minutes = 3
+
+        steps.append(TourStep(
+            step_index=len(steps),
+            title=str(s.get("title") or targets[0].name_zh or f"第 {len(steps)+1} 步"),
+            subtitle=s.get("subtitle"),
+            targets=targets,
+            camera=CameraTarget(
+                center_ra_deg=center_ra,
+                center_dec_deg=center_dec,
+                fov_deg=fov,
+                highlight_ids=[t.id for t in targets],
+            ),
+            narration=narration,
+            estimated_minutes=minutes,
+            next_hint=s.get("next_hint") or (
+                "点击下一步，继续探索" if i < len(steps_raw) - 1 else "导览结束，感谢观看"
+            ),
+        ))
+
+    if not steps:
+        return None
+
+    return TourPlan(
+        plan_id=f"plan_{uuid.uuid4().hex[:10]}",
+        title=str(data.get("title") or "实时星空导览"),
+        description=str(data.get("description") or
+                        f"基于此刻实时星空生成的 {len(steps)} 站导览。"),
+        total_minutes=sum(s.estimated_minutes for s in steps),
+        difficulty="easy",
+        steps=steps,
+        generated_at=datetime.now().isoformat(),
+        location_summary=f"纬度 {lat:.2f}°, 经度 {lon:.2f}°",
+    )
