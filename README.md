@@ -1,8 +1,8 @@
 # 🌌 Celestial Web App - AI Stargazing & 3D Sky Visualization
 
-A high-performance, browser-based 3D celestial sphere simulator with integrated AI-powered astrophotography recognition (plate solving) and conversational stargazing tours. Built with Three.js, FastAPI, Qwen-VL, and DeepSeek.
+A high-performance, browser-based 3D celestial sphere simulator with integrated AI-powered astrophotography recognition (plate solving), conversational stargazing tours, and an AI astronomy assistant. Built with Three.js, FastAPI, Qwen-VL, and DeepSeek.
 
-![Version](https://img.shields.io/badge/version-2.0-blue)
+![Version](https://img.shields.io/badge/version-1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.9+-yellow)
 ![Three.js](https://img.shields.io/badge/three.js-r128-orange)
@@ -43,6 +43,20 @@ A high-performance, browser-based 3D celestial sphere simulator with integrated 
 - **Altitude-Azimuth Annotation**: Each target is annotated with real-time alt/az for the observer's location and time
 - **Graceful Fallback**: If the LLM is unreachable, a local planner builds a tour from the current sky state
 
+### 🤖 AI Astronomy Assistant (Agent)
+A conversational agent that autonomously decides which tools to call. Unlike the tour module (which generates a plan), the assistant handles **open-ended user questions** through multi-round function calling.
+
+- **① Astronomy Q&A**: Direct answers to knowledge questions ("什么是梅西耶天体？", "北极星为什么不动？") — no tool needed, answered by the LLM directly
+- **② Observation Site Recommendation**: Ranks nearby dark-sky locations by light pollution (Bortle class) + distance, optionally enriched with cloud cover from OpenWeatherMap
+- **③ Celestial Event Recommendations**: Lists upcoming meteor showers, planetary oppositions, eclipses with a **recommendation score (0~1)** that factors in moon phase
+- **④ Intelligent Transport Planning**: Computes driving distance / duration / route suggestion to any observation site via OSRM (no API key required)
+- **Autonomous Tool Selection**: The LLM reads tool descriptions and picks which to call — you don't write `if/else` routing
+- **Multi-Round Function Calling**: Up to 5 iterations of observe → decide → execute → observe loop
+- **Conversation Memory**: 20-message sliding window per session, with explicit clear
+- **Floating Panel UI**: Right-top overlay triggered by 🤖 HUD button; carries current observer location automatically
+- **Tool Call Visualization**: Every tool invocation renders as a badge with hover tooltip showing arguments
+- **Graceful Error Handling**: Tool failures are returned to the LLM as structured errors, allowing it to recover or explain
+
 ### 🕐 Time & Location Control
 - Full date/time editor with adjustable simulation speed (0.5× to 10×)
 - Preset locations (Hong Kong, Beijing, Tokyo, NYC, London, Sydney, poles, equator)
@@ -79,6 +93,23 @@ celestial-web-app/
 │   │   ├── schemas.py         # Pydantic models
 │   │   ├── session_store.py   # In-memory session store (TTL)
 │   │   └── templates.py       # Built-in tour routes
+│   ├── agent/                 # ★ AI Astronomy Assistant
+│   │   ├── __init__.py        # Exports agent_router
+│   │   ├── api.py             # /api/agent/* endpoints
+│   │   ├── agent.py           # Agent loop: observe → decide → execute
+│   │   ├── llm.py             # LLM client with function-calling support
+│   │   ├── prompts.py         # System prompt + user context builder
+│   │   ├── schemas.py         # Pydantic request/response models
+│   │   ├── session_store.py   # Multi-turn conversation memory
+│   │   ├── tools/
+│   │   │   ├── __init__.py    # Trigger @register decorators
+│   │   │   ├── registry.py    # Tool registry + OpenAI schema exporter
+│   │   │   ├── location.py    # ② Observation site recommendation
+│   │   │   ├── events.py      # ③ Celestial event recommendations
+│   │   │   └── transport.py   # ④ Transport planning (OSRM)
+│   │   └── data/
+│   │       ├── light_pollution.json    # Bortle-class site database
+│   │       └── celestial_events.json   # Event calendar
 │   ├── requirements.txt
 │   └── .env.example           # Environment variable template
 ├── frontend/
@@ -90,7 +121,8 @@ celestial-web-app/
 │   │   ├── time.js            # Time simulation engine
 │   │   ├── search.js          # Star search with autocomplete
 │   │   ├── dso.js             # Deep sky object catalog
-│   │   └── tour.js            # AI tour UI + snapshot prompt builder
+│   │   ├── tour.js            # AI tour UI + snapshot prompt builder
+│   │   └── agent.js           # ★ AI assistant panel (chat UI)
 │   ├── vision.js              # Photo identification UI + modal
 │   ├── css/style.css          # Dark theme styling
 │   └── data/
@@ -104,7 +136,8 @@ celestial-web-app/
 - Python 3.9+
 - Node.js (optional, for frontend dev)
 - **ModelScope API Key** for photo identification ([Get one here](https://modelscope.cn/my/myaccesstoken))
-- **DeepSeek API Key** for the AI tour module ([Get one here](https://platform.deepseek.com)) — *optional, falls back to local planning*
+- **DeepSeek API Key** for the AI tour + assistant ([Get one here](https://platform.deepseek.com)) — *optional, falls back to local planning*
+- **OpenWeatherMap API Key** (optional) for cloud cover in site recommendations ([Get one here](https://openweathermap.org/api))
 
 ### Installation
 
@@ -183,7 +216,7 @@ All configuration lives in `backend/.env`:
 | Variable | Default | Description |
 |---|---|---|
 | `TOUR_LLM_ENABLED` | `1` | Set to `0` to disable LLM entirely (local planner only) |
-| `TOUR_LLM_API_KEY` | *(optional)* | DeepSeek API key. If unset, the local planner handles all requests |
+| `TOUR_LLM_API_KEY` | *(optional)* | DeepSeek API key. Shared with the AI Assistant |
 | `TOUR_LLM_API_URL` | `https://api.deepseek.com/v1/chat/completions` | Chat completions endpoint |
 | `TOUR_LLM_MODEL` | `deepseek-chat` | Model ID. Use `deepseek-reasoner` for reasoning models |
 | `TOUR_LLM_TIMEOUT` | `120` | Base request timeout in seconds (overridden per call for skeleton) |
@@ -193,6 +226,19 @@ All configuration lives in `backend/.env`:
 | `TOUR_LLM_MAX_TOKENS_SKELETON` | `64000` | Token budget for the snapshot tour skeleton (reasoning models need headroom) |
 
 > **Reasoning models**: The client automatically falls back to `reasoning_content` when `content` is empty (common with DeepSeek V4-series when the token budget is exhausted by the thinking chain), and enforces JSON output via `response_format={"type": "json_object"}` with automatic 400-downgrade retry. If your endpoint rejects `response_format`, the client retries once without it.
+
+### AI Astronomy Assistant (Agent)
+
+The assistant **shares the same LLM credentials as the tour module** (`TOUR_LLM_API_KEY` / `TOUR_LLM_API_URL`) but can use a different model.
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_LLM_MODEL` | *(falls back to `TOUR_LLM_MODEL`)* | Model ID for the assistant. Use a fast model like `deepseek-chat` |
+| `AGENT_LLM_TIMEOUT` | `120` | Request timeout in seconds |
+| `AGENT_LLM_MAX_TOKENS` | `8000` | Token budget per LLM call |
+| `WEATHER_API_KEY` | *(optional)* | OpenWeatherMap key for cloud cover in site recommendations |
+
+**Tool-specific settings** are documented inside each tool module (`agent/tools/*.py`). The site database lives at `agent/data/light_pollution.json`, and the event calendar at `agent/data/celestial_events.json` — both are plain JSON and easy to extend.
 
 ## 📸 AI Identification Pipeline
 
@@ -268,6 +314,41 @@ Tour UI renders step 1; camera flies to target; "下一步" triggers /next
 tour.js._localPlan(skyState)       → local fallback tour (planets → constellations → DSOs)
 ```
 
+## 🤖 AI Assistant (Agent) Pipeline
+
+```
+User types: "香港有什么适合观星的地点？"
+    ↓
+POST /api/agent/chat
+    ↓
+agent.run_agent()
+    ↓  ┌──────────────────────────────────────────────────┐
+       │  Loop (up to MAX_ITERATIONS = 5):                │
+       │                                                  │
+       │   1. Send messages + tool schemas to LLM         │
+       │   2. If message contains `tool_calls`:           │
+       │        - Execute each tool (limit 3 per turn)    │
+       │        - Append tool result to messages          │
+       │        - Loop back to step 1                     │
+       │   3. Else (no tool_calls):                       │
+       │        - Return `content` as final answer        │
+       │        - Save to session history                 │
+       │        - Break                                    │
+       └──────────────────────────────────────────────────┘
+    ↓
+Response { session_id, answer, tool_calls: [...] }
+    ↓
+agent.js renders answer + tool badges (with hover tooltips)
+```
+
+### Assistant API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/agent/sessions` | Create a new agent session |
+| `POST` | `/api/agent/chat` | ★ Main entry: send a message, receive answer + tool calls |
+| `POST` | `/api/agent/sessions/{id}/clear` | Clear conversation history |
+
 ### Tour API
 
 | Method | Path | Description |
@@ -286,7 +367,11 @@ tour.js._localPlan(skyState)       → local fallback tour (planets → constell
 | 3D Renderer | Three.js r128 (custom Alt-Az horizon system) |
 | Backend API | FastAPI + Uvicorn |
 | VL Model | Qwen/Qwen3.8-Flash-Next (overridable via `VL_MODEL`) |
-| Tour LLM | DeepSeek Chat / DeepSeek Reasoner (OpenAI-compatible API) |
+| Tour LLM | DeepSeek Chat / DeepSeek Reasoner (OpenAI-compatible) |
+| Agent LLM | Same provider as Tour (configurable via `AGENT_LLM_MODEL`) |
+| Function Calling | OpenAI-compatible tool calling format |
+| Weather Data | OpenWeatherMap (optional) |
+| Routing | OSRM public server (no key required) |
 | Image Processing | OpenCV + NumPy + Pillow |
 | Plate Solving | Custom RANSAC + ICP (NumPy, complex-number similarity) |
 | Star Catalog | HYG Database v41 |
@@ -305,6 +390,21 @@ The correct approach has three stages:
 
 This cleanly separates "what is in the image" (VL) from "where is it" (geometry), and eliminates VL's well-known weakness at pixel-coordinate regression.
 
+## 🧩 Workflow vs Agent: Why Both?
+
+This project deliberately ships **two LLM-driven features** with different design philosophies:
+
+| Aspect | AI Tour (Workflow) | AI Assistant (Agent) |
+|---|---|---|
+| **Control flow** | Written by hand (`if snapshot → skeleton → narrate`) | Decided by LLM at runtime |
+| **LLM calls** | Fixed (2 per tour) | Variable (1–5 per question) |
+| **Predictability** | High — every tour follows the same path | Medium — same input may take different paths |
+| **Best for** | Structured output (a tour plan) | Open-ended questions (any astronomy topic) |
+| **Failure mode** | Fall back to local planner | Explain tool error, retry, or rephrase |
+| **Cost** | Fixed per call | Variable, but rarely exceeds 3–5k tokens |
+
+**Rule of thumb**: if you know exactly what the user wants and how to compute it, use a Workflow. If the user might ask anything, use an Agent.
+
 ## 📝 Development Notes
 
 - **Star coordinates** use J2000 epoch internally; precession matrix applied per-frame based on simulation time
@@ -322,6 +422,10 @@ This cleanly separates "what is in the image" (VL) from "where is it" (geometry)
 - **Tour LLM** is fully optional: if no key is configured, `tour.js._localPlan()` builds a tour from the live sky state
 - **Reasoning models**: `llm_client._post_chat()` normalizes responses by falling back to `reasoning_content` when `content` is empty, and enforces JSON via `response_format` with auto-downgrade on 400. Diagnostic logs print `model / finish / usage / content_len / reasoning_len` for every call
 - **Token budget tuning**: if you switch between reasoning and non-reasoning models, adjust `TOUR_LLM_MAX_TOKENS_*` — reasoning models need 4–10× headroom because the thinking chain consumes the budget before `content` starts
+- **Agent tool registration**: tools self-register via `@register(name, schema)` decorator in `agent/tools/registry.py`; adding a new tool means creating one file and importing it in `agent/tools/__init__.py`
+- **Agent session memory**: 20-message sliding window; older messages are dropped automatically to bound token usage
+- **Agent cost profile**: a typical single-tool conversation costs ~3,200 tokens (~¥0.01); a pure-knowledge question costs ~1,100 tokens
+- **Agent model selection**: `AGENT_LLM_MODEL` overrides `TOUR_LLM_MODEL` for the assistant only; the URL and API key remain shared
 
 ## 🤝 Contributing
 
@@ -333,6 +437,8 @@ Contributions are welcome! Areas of interest:
 - Mobile-responsive touch controls
 - Multi-language UI support
 - Streaming tour narration (currently waits for full JSON response)
+- **More agent tools**: ISS pass prediction, satellite tracking, telescope control
+- **Agent MCP integration**: expose the tool registry as an MCP server for Claude Desktop / Cursor
 
 ## 📄 License
 
@@ -344,5 +450,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [d3-celestial](https://github.com/ofrohn/d3-celestial) — Constellation line data
 - [ModelScope](https://modelscope.cn) — Qwen-VL model hosting
 - [DeepSeek](https://platform.deepseek.com) — Tour intent LLM
+- [OpenWeatherMap](https://openweathermap.org) — Cloud cover data
+- [OSRM](http://project-osrm.org/) — Open-source routing
 - [Three.js](https://threejs.org) — WebGL rendering engine
 ```
