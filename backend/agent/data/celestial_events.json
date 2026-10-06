@@ -1,0 +1,14 @@
+{
+  "events": [
+    {"name": "英仙座流星雨极大",   "date": "2026-08-12", "type": "meteor_shower",      "base_score": 0.95, "reason": "年度三大流星雨之一，每小时最多 100 颗", "visibility": "北半球最佳"},
+    {"name": "双子座流星雨极大",   "date": "2026-12-14", "type": "meteor_shower",      "base_score": 0.95, "reason": "稳定高产，肉眼可见"},
+    {"name": "象限仪座流星雨极大", "date": "2026-01-04", "type": "meteor_shower",      "base_score": 0.85, "reason": "极短爆发，需精确观测"},
+    {"name": "木星冲日",           "date": "2026-11-20", "type": "planet_opposition",  "base_score": 0.90, "reason": "木星最亮最近，整夜可见"},
+    {"name": "土星冲日",           "date": "2026-09-08", "type": "planet_opposition",  "base_score": 0.85, "reason": "土星环角度佳"},
+    {"name": "日环食（南极）",     "date": "2026-02-17", "type": "eclipse",            "base_score": 0.80, "reason": "南极圈可见，需专业观测"},
+    {"name": "月全食",             "date": "2026-03-03", "type": "eclipse",            "base_score": 0.85, "reason": "亚洲、大洋洲可见"},
+    {"name": "金星西大距",         "date": "2026-01-10", "type": "conjunction",        "base_score": 0.75, "reason": "日出前东方最亮"},
+    {"name": "水星东大距",         "date": "2026-02-19", "type": "conjunction",        "base_score": 0.60, "reason": "日落后西方低空，观测窗口短"},
+    {"name": "中秋满月",           "date": "2026-09-25", "type": "full_moon",          "base_score": 0.70, "reason": "适合拍月，但不利于深空观测"}
+  ]
+}

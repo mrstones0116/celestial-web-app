@@ -32,10 +32,10 @@
     <div id="fov-indicator" class="fov-indicator"></div>
 </section>
 
-<!-- ===== 悬浮 HUD 按钮 ===== -->
 <button id="toggle-left"       class="hud-btn" title="打开/收起 控制菜单">☰</button>
 <button id="toggle-fullscreen" class="hud-btn" title="全屏 / 窗口模式">⛶</button>
 <button id="toggle-right"      class="hud-btn" title="打开/收起 数据面板">📊</button>
+<button id="toggle-agent"      class="hud-btn" title="AI 天文小助手">🤖</button>
 <button id="quit-app"          class="hud-btn" title="退出程序">✕</button>
 
 <!-- ===== 左抽屉：控制菜单 ===== -->
@@ -102,7 +102,7 @@
         <h3>🎬 智能星空导览</h3>
         <div id="tour-context" class="status-text">⏳ 等待星表数据…</div>
         <div class="time-controls" style="margin-top:8px;">
-            <button id="tour-auto" class="primary-btn">🔭 按当前星空重新生成</button>
+            <button id="tour-auto" class="primary-btn">🔭 生成导览</button>
         </div>
         <div id="tour-status" class="status-text"></div>
 
@@ -268,6 +268,28 @@
 </div>
 <div id="tooltip" class="tooltip"></div>
 
+<!-- ===== AI 天文小助手 面板 ===== -->
+<aside id="agent-panel" class="agent-panel" aria-hidden="true">
+    <div class="agent-header">
+        <span class="agent-title">🤖 AI 天文小助手</span>
+        <button id="agent-clear" class="agent-header-btn" title="清空对话">🗑</button>
+        <button id="agent-close" class="agent-header-btn" title="收起面板">✕</button>
+    </div>
+    <div id="agent-messages" class="agent-messages"></div>
+    <div class="agent-location-hint">
+        <label>
+            <input type="checkbox" id="agent-use-location" checked>
+            <span>附带当前位置（经纬度）</span>
+        </label>
+    </div>
+    <div class="agent-input-row">
+        <textarea id="agent-input"
+                  placeholder="问我任何天文问题…（Enter 发送 / Shift+Enter 换行）"
+                  rows="2"></textarea>
+        <button id="agent-send" class="agent-send-btn">发送</button>
+    </div>
+</aside>
+
 <!-- ⚠️ 脚本顺序不可调换 -->
 <script src="js/scene3d.js"></script>
 <script src="js/chart2d.js"></script>
@@ -279,5 +301,6 @@
 <!-- ★★★ 照片识星交互逻辑（由 vision.js 全权接管，已移除旧版内联脚本防止重复调用） ★★★ -->
 <script src="vision.js"></script>
 <script src="js/tour.js"></script>
+<script src="js/agent.js"></script>   <!-- ★ 新增 --
 </body>
 </html>

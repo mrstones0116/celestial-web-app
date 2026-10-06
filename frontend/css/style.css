@@ -1,6 +1,6 @@
 /* =========================================================
    3D 天球可视化系统 - 完整 style.css
-   全屏沉浸布局 + 左右抽屉 + 时间编辑器 + 收藏夹 + 信息面板
+   全屏沉浸布局 + 左右抽屉 + 时间编辑器 + 收藏夹 + 信息面板 + AI 天文小助手
    ========================================================= */
 
 /* ===== 全局样式 ===== */
@@ -47,7 +47,7 @@ html, body {
     z-index: 5;
 }
 
-/* ===== HUD 悬浮按钮（全屏/抽屉/退出）===== */
+/* ===== HUD 悬浮按钮（全屏/抽屉/退出/AI）===== */
 .hud-btn {
     position: fixed;
     z-index: 300;
@@ -60,12 +60,18 @@ html, body {
     color: #7fd4ff;
     font-size: 1.05rem;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, box-shadow 0.2s;
     backdrop-filter: blur(4px);
 }
 .hud-btn:hover { background: #2a4a9f; color: #fff; border-color: #4a7dff; }
+
+/* —— 顶部 HUD 单行布局 ——
+   左侧：☰  ⛶          右侧：🤖  📊  ✕
+*/
 #toggle-left       { left: 12px; }
 #toggle-fullscreen { left: 60px; }
+
+#toggle-agent      { right: 108px; }
 #toggle-right      { right: 60px; }
 #quit-app          { right: 12px; background: rgba(122,16,32,0.85); border-color: #ff4444; color: #fff; }
 #quit-app:hover    { background: #aa2030; box-shadow: 0 0 12px rgba(255,68,68,0.6); }
@@ -464,4 +470,267 @@ tr:hover { background: rgba(74,144,226,0.1); }
     .drawer { width: 280px; }
     .drawer.right { width: 300px; }
     #info-panel { width: 240px; right: 10px; }
+}
+
+/* ============================================================
+   AI 天文小助手面板
+   ============================================================ */
+.agent-panel {
+    position: fixed;
+    top: 64px;
+    right: 20px;
+    width: 380px;
+    max-height: calc(100vh - 100px);
+    background: rgba(16, 22, 36, 0.96);
+    border: 1px solid rgba(100, 160, 240, 0.35);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65),
+                0 0 0 1px rgba(100, 160, 240, 0.08);
+    display: flex;
+    flex-direction: column;
+    z-index: 1200;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    /* 默认从右侧滑出隐藏 */
+    transform: translateX(calc(100% + 30px));
+    opacity: 0;
+    pointer-events: none;
+    transition: transform .28s cubic-bezier(.2,.8,.2,1),
+                opacity .28s ease;
+}
+
+.agent-panel.open {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ===== 顶部标题栏 ===== */
+.agent-header {
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(100, 160, 240, 0.2);
+    flex-shrink: 0;
+}
+
+.agent-title {
+    flex: 1;
+    font-weight: 600;
+    font-size: 14px;
+    color: #8cd6ff;
+    letter-spacing: 0.3px;
+}
+
+.agent-header-btn {
+    background: transparent;
+    border: none;
+    color: #8899aa;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    transition: background .15s, color .15s;
+}
+.agent-header-btn:hover {
+    background: rgba(100, 160, 240, 0.15);
+    color: #fff;
+}
+
+/* ===== 消息区 ===== */
+.agent-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 200px;
+    max-height: calc(100vh - 300px);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100,160,240,0.3) transparent;
+}
+.agent-messages::-webkit-scrollbar { width: 6px; }
+.agent-messages::-webkit-scrollbar-thumb {
+    background: rgba(100, 160, 240, 0.3);
+    border-radius: 3px;
+}
+.agent-messages::-webkit-scrollbar-track { background: transparent; }
+
+.agent-msg {
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.65;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    animation: agentMsgIn .25s ease-out;
+}
+@keyframes agentMsgIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.agent-msg.user {
+    background: rgba(60, 120, 200, 0.25);
+    color: #e0ecff;
+    align-self: flex-end;
+    max-width: 88%;
+    border: 1px solid rgba(100, 160, 240, 0.3);
+}
+
+.agent-msg.assistant {
+    background: rgba(30, 45, 70, 0.85);
+    color: #d0d8e4;
+    align-self: flex-start;
+    max-width: 92%;
+    border: 1px solid rgba(100, 160, 240, 0.15);
+}
+
+.agent-msg.thinking {
+    color: #8899aa;
+    font-style: italic;
+    opacity: 0.75;
+}
+.agent-msg.thinking::after {
+    content: '';
+    display: inline-block;
+    width: 3px; height: 3px;
+    margin-left: 4px;
+    background: #8899aa;
+    border-radius: 50%;
+    animation: agentBlink 1s infinite;
+}
+@keyframes agentBlink {
+    0%, 60%, 100% { opacity: 0.2; }
+    30%           { opacity: 1; }
+}
+
+/* ===== 工具调用徽章 ===== */
+.agent-tool-badges {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.agent-tool-badge {
+    display: inline-block;
+    padding: 3px 8px;
+    background: rgba(80, 200, 140, 0.15);
+    color: #6ee0a0;
+    border: 1px solid rgba(80, 200, 140, 0.3);
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: Consolas, 'Courier New', monospace;
+    cursor: help;
+}
+.agent-tool-badge.error {
+    background: rgba(220, 80, 80, 0.15);
+    color: #ff9999;
+    border-color: rgba(220, 80, 80, 0.3);
+}
+
+/* ===== 位置开关 ===== */
+.agent-location-hint {
+    padding: 0 12px 8px;
+    font-size: 11px;
+    color: #7788a0;
+    flex-shrink: 0;
+}
+.agent-location-hint label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+.agent-location-hint input[type="checkbox"] {
+    accent-color: #4a90e2;
+    cursor: pointer;
+}
+
+/* ===== 输入区 ===== */
+.agent-input-row {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid rgba(100, 160, 240, 0.2);
+    flex-shrink: 0;
+}
+
+#agent-input {
+    flex: 1;
+    background: rgba(10, 15, 25, 0.8);
+    border: 1px solid rgba(100, 160, 240, 0.25);
+    border-radius: 6px;
+    color: #e0e8f0;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    resize: none;
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+    line-height: 1.5;
+}
+#agent-input:focus {
+    border-color: rgba(100, 160, 240, 0.65);
+    box-shadow: 0 0 0 2px rgba(100, 160, 240, 0.12);
+}
+#agent-input::placeholder {
+    color: #5a6878;
+}
+
+.agent-send-btn {
+    background: linear-gradient(135deg, #3a7bd5, #4a90e2);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 0 18px;
+    min-height: 38px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: transform .1s, box-shadow .2s;
+    flex-shrink: 0;
+}
+.agent-send-btn:hover:not(:disabled) {
+    box-shadow: 0 0 14px rgba(74, 144, 226, 0.55);
+}
+.agent-send-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+.agent-send-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* ===== 🤖 HUD 按钮激活态 ===== */
+#toggle-agent.active {
+    background: rgba(74, 144, 226, 0.35);
+    color: #fff;
+    border-color: #4a7dff;
+}
+
+/* ===== 小屏适配 ===== */
+@media (max-width: 720px) {
+    .agent-panel {
+        width: calc(100vw - 24px);
+        right: 12px;
+        top: 60px;
+        max-height: calc(100vh - 80px);
+    }
+    .agent-messages {
+        max-height: calc(100vh - 320px);
+    }
+}
+
+/* ===== 无障碍：用户偏好减弱动效 ===== */
+@media (prefers-reduced-motion: reduce) {
+    .agent-panel,
+    .agent-msg,
+    .drawer,
+    .hud-btn {
+        transition: none !important;
+        animation: none !important;
+    }
 }

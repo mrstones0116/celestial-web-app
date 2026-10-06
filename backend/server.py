@@ -1,8 +1,9 @@
 """
-天球可视化系统 - FastAPI 后端 · 照片识星 v4
+天球可视化系统 - FastAPI 后端 · 照片识星 v4 + AI 天文小助手
 · 本地 OpenCV 检测
 · VL 只识别星座名（三字母缩写）
 · HYG 星表 + RANSAC 拟合投影，忠实绘制星座骨架
+· AI Agent：知识问答 / 观测地点推荐 / 天象指数 / 交通安排
 """
 import os
 import sys
@@ -29,6 +30,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from data_loader import HYGDataLoader
 from tour.api import router as tour_router, set_loader
 
+# ★ 新增：AI 天文小助手 Agent
+from agent import agent_router
+
 from vision.config import VisionConfig
 from vision.pipeline import VisionPipeline
 from vision.constellation_catalog import ConstellationCatalog
@@ -36,7 +40,7 @@ from vision.constellation_catalog import ConstellationCatalog
 
 # ==================== App & 中间件 ====================
 
-app = FastAPI(title="3D天球可视化系统 API", version="4.0.0")
+app = FastAPI(title="3D天球可视化系统 API", version="4.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +48,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 已有：导览模块
 app.include_router(tour_router, prefix="/api/tour", tags=["tour"])
+
+# ★ 新增：AI 天文小助手（agent 路由内部已定义 /api/agent 前缀）
+app.include_router(agent_router)
 
 
 # ==================== 全局单例 ====================
@@ -80,6 +89,14 @@ async def _startup_load():
         import traceback
         traceback.print_exc()
         print(f"⚠️ catalog 加载失败: {e}")
+
+    # 3) ★ 新增：探测 Agent 可用工具
+    try:
+        from agent.tools import list_tools
+        tools = list_tools()
+        print(f"🤖 AI 小助手: 已注册 {len(tools)} 个工具 → {', '.join(tools)}")
+    except Exception as e:
+        print(f"⚠️ Agent 工具注册表加载失败: {e}")
 
 
 # ==================== 基础数据 API ====================
@@ -196,5 +213,13 @@ if __name__ == "__main__":
         print("⚠️  未配置 VL API Key")
     print(f"📚 星表: {'已加载' if loader.loaded else '未加载'} "
           f"({len(loader.df) if loader.df is not None else 0} 颗)")
+
+    # ★ 新增：Agent 状态
+    try:
+        from agent.tools import list_tools
+        tools = list_tools()
+        print(f"🤖 AI 小助手: {len(tools)} 个工具已注册")
+    except Exception as e:
+        print(f"⚠️ AI 小助手未就绪: {e}")
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
