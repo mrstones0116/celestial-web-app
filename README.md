@@ -34,7 +34,7 @@ A high-performance, browser-based 3D celestial sphere simulator with integrated 
 ### 🎬 AI Stargazing Tour
 - **Snapshot-Driven Planning**: Reads the live sky state from the 3D scene (visible constellations, planets, Messier objects, sun altitude) and asks the LLM to plan a tour — **no user input required**
 - **Natural-Language Planning**: Also accepts free-form requests like "我想看夏季的星空" or "show me the Messier objects"
-- **Reasoning-Model Ready**: Full support for DeepSeek V4-series and other thinking models — automatically falls back to `reasoning_content` when `content` is empty, and enforces JSON output via `response_format`
+- **Reasoning-Model Ready**: Full support for reasoning models (e.g. `deepseek-reasoner`) — automatically falls back to `reasoning_content` when `content` is empty, and enforces JSON output via `response_format`
 - **Structured JSON Guarantee**: Uses `response_format={"type": "json_object"}` with automatic 400-downgrade retry for compatibility layers that don't support it
 - **Configurable Token Budget**: Per-call `max_tokens` overridable via env vars, tuned for both reasoning and non-reasoning models
 - **Pre-Built Tour Templates**: Summer Triangle, Winter Orion, Bright Star Tour, Messier Marathon samples
@@ -46,16 +46,21 @@ A high-performance, browser-based 3D celestial sphere simulator with integrated 
 ### 🤖 AI Astronomy Assistant (Agent)
 A conversational agent that autonomously decides which tools to call. Unlike the tour module (which generates a plan), the assistant handles **open-ended user questions** through multi-round function calling.
 
-- **① Astronomy Q&A**: Direct answers to knowledge questions ("什么是梅西耶天体？", "北极星为什么不动？") — no tool needed, answered by the LLM directly
-- **② Observation Site Recommendation**: Ranks nearby dark-sky locations by light pollution (Bortle class) + distance, optionally enriched with cloud cover from OpenWeatherMap
-- **③ Celestial Event Recommendations**: Lists upcoming meteor showers, planetary oppositions, eclipses with a **recommendation score (0~1)** that factors in moon phase
-- **④ Intelligent Transport Planning**: Computes driving distance / duration / route suggestion to any observation site via OSRM (no API key required)
+| Tool | Purpose | External service |
+|---|---|---|
+| *(no tool)* | **① Astronomy Q&A** — knowledge questions answered directly by the LLM | — |
+| `recommend_observation_site` | **② Observation site recommendation** — ranks nearby dark-sky sites by Bortle class + distance, optionally enriched with cloud cover | local `light_pollution.json` + OpenWeatherMap (optional) |
+| `get_celestial_events` | **③ Celestial event recommendations** — meteor showers, oppositions, eclipses with a **0~1 recommendation score** factoring in moon phase | local `celestial_events.json` |
+| `plan_transport` | **④ Intelligent transport planning** — driving distance / duration / route suggestion to any observation site | OSRM public server (no key required) |
+
 - **Autonomous Tool Selection**: The LLM reads tool descriptions and picks which to call — you don't write `if/else` routing
-- **Multi-Round Function Calling**: Up to 5 iterations of observe → decide → execute → observe loop
+- **Multi-Round Function Calling**: Up to 5 iterations of observe → decide → execute → observe loop, capped at 3 tools per turn
 - **Conversation Memory**: 20-message sliding window per session, with explicit clear
 - **Floating Panel UI**: Right-top overlay triggered by 🤖 HUD button; carries current observer location automatically
 - **Tool Call Visualization**: Every tool invocation renders as a badge with hover tooltip showing arguments
 - **Graceful Error Handling**: Tool failures are returned to the LLM as structured errors, allowing it to recover or explain
+
+> **Optional upgrade path**: `plan_transport` currently uses OSRM (free, no key). For production use, you can swap in Google Routes API (`GOOGLE_ROUTES_API_KEY`) with OSRM as automatic fallback — see `agent/tools/transport.py`. Similarly, `recommend_observation_site` can enrich static Bortle data with real-time SQM from DarkSkySites (`DARKSKYSITES_API_KEY`).
 
 ### 🕐 Time & Location Control
 - Full date/time editor with adjustable simulation speed (0.5× to 10×)
@@ -72,6 +77,7 @@ celestial-web-app/
 │   ├── server.py              # FastAPI API server (pure adapter)
 │   ├── data_loader.py         # HYG star catalog loader (local-first + download fallback)
 │   ├── download.py            # One-shot HYG download helper
+│   ├── test_api_keys.py       # Standalone key connectivity checker (LLM / VL / weather)
 │   ├── data/
 │   │   └── hygdata_v41.csv    # ~35 MB, not committed (see Quick Start)
 │   ├── vision/                # AI vision pipeline
@@ -141,28 +147,56 @@ celestial-web-app/
 
 ### Installation
 
+**Linux / macOS**
+
 ```bash
-# Clone repository
 git clone https://github.com/mrstones0116/celestial-web-app.git
 cd celestial-web-app
 
-# Create virtual environment
 python -m venv astro_env
-source astro_env/bin/activate  # Linux/Mac
-# astro_env\Scripts\activate   # Windows
+source astro_env/bin/activate
 
-# Install dependencies
 pip install -r backend/requirements.txt
 
-# Configure API keys
 cp backend/.env.example backend/.env
 # Edit backend/.env and fill in your tokens
 
-# Download HYG star catalog (~35 MB)
+cd backend
+python download.py     # ~35 MB HYG catalog
+cd ..
+```
+
+**Windows (PowerShell / CMD)**
+
+```powershell
+git clone https://github.com/mrstones0116/celestial-web-app.git
+cd celestial-web-app
+
+python -m venv astro_env
+astro_env\Scripts\activate
+
+pip install -r backend\requirements.txt
+
+copy backend\.env.example backend\.env
+REM Edit backend\.env and fill in your tokens
+
 cd backend
 python download.py
 cd ..
 ```
+
+> ⚠️ **Never commit `backend/.env`.** It is already covered by `.gitignore`; if you fork the repo, double-check `git status` before pushing.
+
+### Verify your API keys first
+
+Before starting the server, confirm every key works:
+
+```bash
+cd backend
+python test_api_keys.py
+```
+
+Each key (LLM / VL / weather) is tested independently — a failure in one does not block the others. Exit code `0` means all pass.
 
 ### Running
 
@@ -178,15 +212,15 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 
 ## ⚙️ Configuration
 
-All configuration lives in `backend/.env`:
+All configuration lives in `backend/.env`. Variables are grouped by feature below.
 
-### Photo Identification (ModelScope / Qwen-VL)
+### Photo Identification — ModelScope (primary)
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODELSCOPE_API_KEY` / `ZHIPU_API_KEY` | *(required)* | ModelScope or Zhipu access token; either one works |
-| `ZHIPU_API_URL` | `https://api-inference.modelscope.cn/v1/chat/completions` | VL endpoint |
-| `VL_MODEL` | `Qwen/Qwen3.8-Flash-Next` | Vision-language model ID (override for your deployment) |
+| `MODELSCOPE_API_KEY` | *(required)* | ModelScope access token ([get one](https://modelscope.cn/my/myaccesstoken)) |
+| `MODELSCOPE_API_URL` | `https://api-inference.modelscope.cn/v1/chat/completions` | ModelScope chat completions endpoint |
+| `VL_MODEL` | `Qwen/Qwen2.5-VL-7B-Instruct` | Vision-language model ID. **Replace with the exact model ID available on your ModelScope account.** |
 | `VISION_MAX_DIM` | `1280` | Longest-edge resize before detection |
 | `VISION_TOP_N` | `50` | Max number of stars to keep |
 | `VISION_MAX_UPLOAD_MB` | `20` | Upload size limit |
@@ -198,6 +232,18 @@ All configuration lives in `backend/.env`:
 | `VISION_VL_MAX_RETRIES` | `4` | VL retry count |
 | `VISION_VL_MAX_TOKENS` | `4000` | VL max output tokens |
 | `DEBUG_VISION` | `0` | Set to `1` to save debug images |
+
+### Photo Identification — Zhipu (optional alternative)
+
+If you prefer Zhipu's GLM-4V series, set these **instead of** the ModelScope block:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZHIPU_API_KEY` | *(optional)* | Zhipu access token |
+| `ZHIPU_API_URL` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | Zhipu endpoint |
+| `VL_MODEL` | *(set to a Zhipu model ID, e.g. `glm-4v-plus`)* | — |
+
+> Only one provider is active at a time. If both keys are present, ModelScope takes precedence.
 
 ### Plate Solving
 
@@ -225,7 +271,7 @@ All configuration lives in `backend/.env`:
 | `TOUR_LLM_MAX_TOKENS_BATCH` | `32000` | Token budget for batch narration (all stops at once) |
 | `TOUR_LLM_MAX_TOKENS_SKELETON` | `64000` | Token budget for the snapshot tour skeleton (reasoning models need headroom) |
 
-> **Reasoning models**: The client automatically falls back to `reasoning_content` when `content` is empty (common with DeepSeek V4-series when the token budget is exhausted by the thinking chain), and enforces JSON output via `response_format={"type": "json_object"}` with automatic 400-downgrade retry. If your endpoint rejects `response_format`, the client retries once without it.
+> **Reasoning models**: The client automatically falls back to `reasoning_content` when `content` is empty (common with reasoning models when the token budget is exhausted by the thinking chain), and enforces JSON output via `response_format={"type": "json_object"}` with automatic 400-downgrade retry. If your endpoint rejects `response_format`, the client retries once without it.
 
 ### AI Astronomy Assistant (Agent)
 
@@ -254,7 +300,7 @@ detect_stars  (OpenCV)
 prepare_versions
     - Original / brightened / inverted (for VL input)
     ↓
-VLClient.chat_json  (Qwen-VL)
+VLClient.chat_json  (Qwen-VL / GLM-4V)
     - Whole-image semantic recognition
     - Returns: constellation 3-letter abbreviations only
     - NO pixel coordinates, NO bboxes
@@ -366,7 +412,7 @@ agent.js renders answer + tool badges (with hover tooltips)
 |---|---|
 | 3D Renderer | Three.js r128 (custom Alt-Az horizon system) |
 | Backend API | FastAPI + Uvicorn |
-| VL Model | Qwen/Qwen3.8-Flash-Next (overridable via `VL_MODEL`) |
+| VL Model | Qwen-VL on ModelScope (overridable via `VL_MODEL`) |
 | Tour LLM | DeepSeek Chat / DeepSeek Reasoner (OpenAI-compatible) |
 | Agent LLM | Same provider as Tour (configurable via `AGENT_LLM_MODEL`) |
 | Function Calling | OpenAI-compatible tool calling format |
@@ -401,7 +447,7 @@ This project deliberately ships **two LLM-driven features** with different desig
 | **Predictability** | High — every tour follows the same path | Medium — same input may take different paths |
 | **Best for** | Structured output (a tour plan) | Open-ended questions (any astronomy topic) |
 | **Failure mode** | Fall back to local planner | Explain tool error, retry, or rephrase |
-| **Cost** | Fixed per call | Variable, but rarely exceeds 3–5k tokens |
+| **Cost** | Fixed per call | Variable, typically 3,000–5,000 tokens per turn (~¥0.03–0.05) |
 
 **Rule of thumb**: if you know exactly what the user wants and how to compute it, use a Workflow. If the user might ask anything, use an Agent.
 
@@ -424,7 +470,6 @@ This project deliberately ships **two LLM-driven features** with different desig
 - **Token budget tuning**: if you switch between reasoning and non-reasoning models, adjust `TOUR_LLM_MAX_TOKENS_*` — reasoning models need 4–10× headroom because the thinking chain consumes the budget before `content` starts
 - **Agent tool registration**: tools self-register via `@register(name, schema)` decorator in `agent/tools/registry.py`; adding a new tool means creating one file and importing it in `agent/tools/__init__.py`
 - **Agent session memory**: 20-message sliding window; older messages are dropped automatically to bound token usage
-- **Agent cost profile**: a typical single-tool conversation costs ~3,200 tokens (~¥0.01); a pure-knowledge question costs ~1,100 tokens
 - **Agent model selection**: `AGENT_LLM_MODEL` overrides `TOUR_LLM_MODEL` for the assistant only; the URL and API key remain shared
 
 ## 🤝 Contributing
@@ -453,4 +498,3 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [OpenWeatherMap](https://openweathermap.org) — Cloud cover data
 - [OSRM](http://project-osrm.org/) — Open-source routing
 - [Three.js](https://threejs.org) — WebGL rendering engine
-```
